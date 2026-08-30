@@ -324,9 +324,9 @@ impl UnsecuredExchange {
             counter: initial_counter,
             exchange_id,
             source_node_id,
-            retransmit: Duration::from_millis(300),
+            retransmit: Duration::from_secs(10),
             response_timeout: UNSECURED_RESPONSE_TIMEOUT,
-            max_attempts: 5,
+            max_attempts: 6,
             last_consumed_peer_counter: None,
             // Default to the historical UDP/MRP behavior; the BTP path opts in
             // via `new_ephemeral_with` / `run_pase_with`.
