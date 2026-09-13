@@ -2422,6 +2422,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                             vendor_id: d.vendor_id,
                             product_id: d.product_id,
                             label: d.label.clone(),
+                            last_known_addr: d.last_known_addr.clone()
                         })
                     })
                     .collect();
@@ -2806,6 +2807,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     vendor_id: None,
                     product_id: None,
                     label: device.label.clone(),
+                    last_known_addr: device.last_known_addr.clone(),
                 };
                 if let Some(fabric) = self
                     .state
@@ -6811,6 +6813,7 @@ mod tests {
                 vendor_id: Some(0xFFF1),
                 product_id: Some(0x8000),
                 label: Some("plug".to_string()),
+                last_known_addr: None,
             }]
         );
     }

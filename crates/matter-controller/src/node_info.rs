@@ -24,4 +24,6 @@ pub struct NodeInfo {
     pub product_id: Option<u16>,
     /// Caller-supplied opaque label from `commission()`. `None` if none given.
     pub label: Option<String>,
+    /// Last operational address we reached the device at (a discovery hint).
+    pub last_known_addr: Option<String>,
 }
