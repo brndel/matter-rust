@@ -383,12 +383,6 @@ const RESUB_WAIT_TIME_MULTIPLIER_MS: u64 = 10_000;
 const RESUB_MAX_RETRY_WAIT_INTERVAL_MS: u64 = 5_538_000;
 const RESUB_MIN_WAIT_PERCENT: u64 = 30;
 
-/// Approximation of chip's `roundTripTimeout`, added to the negotiated max
-/// interval to form a subscription's liveness deadline. chip derives it from the
-/// session MRP params + `kExpectedIMProcessingTime`; 5 s is a safe, tunable
-/// stand-in (too small ⇒ spurious resubscribes).
-const LIVENESS_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// chip `GetFibonacciForIndex` (F(0)=0, F(1)=1, F(2)=1, F(3)=2, …).
 fn fibonacci(n: u32) -> u64 {
     let (mut a, mut b) = (0u64, 1u64);
@@ -734,7 +728,7 @@ pub(crate) struct SubReceivers {
 /// What `handle_subscribe` returns to `Node::subscribe`: the report receivers
 /// and the `(session, subscription_id)` key (the `Node` adds the command sender
 /// to build the public [`Subscription`]).
-pub(crate) type SubEstablished = (SubReceivers, SubId);
+pub(crate) type SubEstablished = (SubReceivers, SubId, Duration);
 
 /// Maximum non-final chunks a single subscription notification may span before
 /// [`ReportReassembler`] drops the partial accumulation. Bounds memory against a
@@ -2422,7 +2416,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                             vendor_id: d.vendor_id,
                             product_id: d.product_id,
                             label: d.label.clone(),
-                            last_known_addr: d.last_known_addr.clone()
+                            last_known_addr: d.last_known_addr.clone(),
                         })
                     })
                     .collect();
@@ -5272,7 +5266,6 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         let Some(wire_sub_id) = rd.subscription_id else {
             return; // steady-state reports must carry a subscriptionId
         };
-        let now = Instant::now();
         let Some(&sub_id) = self.sub_index.get(&(session_id, wire_sub_id)) else {
             return;
         };
@@ -5280,8 +5273,14 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             debug_assert!(false, "sub_index points at a missing subscription");
             return;
         };
+
+        let Some(session) = self.sessions.get(session_id) else {
+            tracing::warn!("missing session for {session_id:?} in deliver_report");
+            return;
+        };
+
         entry.liveness_deadline =
-            now + std::time::Duration::from_secs(u64::from(entry.max_interval)) + LIVENESS_GRACE;
+            Instant::now() + std::time::Duration::from_secs(u64::from(entry.max_interval)) + session.mrp.config().total_idle_window();
         let peer = entry.peer;
         // Events have no merge semantics — forward them immediately, bypassing the
         // attribute reassembler. Take them out before `push_parsed` consumes `rd`.
@@ -5461,6 +5460,11 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             let Some(p) = self.pending.remove(&key) else {
                 return;
             };
+            let Some(session) = self.sessions.get(session_id) else {
+                tracing::warn!("missing session for {session_id:?} in resolve_subscribe");
+                return;
+            };
+
             let PendingReply::Subscribe {
                 sub_id,
                 reply,
@@ -5482,7 +5486,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     // max interval (the device's agreed reporting cadence).
                     let deadline = Instant::now()
                         + std::time::Duration::from_secs(u64::from(resp.max_interval))
-                        + LIVENESS_GRACE;
+                        + session.mrp.config().total_idle_window();
                     // Signal (re-)establishment to the consumer on the reliable
                     // control channel BEFORE inserting, so we can reap on a dead
                     // receiver. Control events are never dropped by report
@@ -5516,7 +5520,11 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     // Initial subscribe hands the receivers back; a resubscribe
                     // (reply/report_rx None) reuses the consumer's existing ones.
                     if let (Some(reply), Some(rx)) = (reply, report_rx) {
-                        let _ = reply.send(Ok((rx, sub_id)));
+                        let _ = reply.send(Ok((
+                            rx,
+                            sub_id,
+                            Duration::from_secs(resp.max_interval as _),
+                        )));
                     }
                 }
                 Err(e) => {
@@ -12678,6 +12686,7 @@ mod tests {
             tx: cmd_tx,
             key: SubId(1),
             cancelled: true, // suppress the Drop cancel (no live actor here)
+            max_report_interval: Duration::from_secs(1),
         };
 
         match sub.next().await {

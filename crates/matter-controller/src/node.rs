@@ -644,7 +644,7 @@ impl Node {
         let fields_tlv = encode_announce_ota_provider(
             provider_node_id,
             vendor_id,
-            AnnouncementReasonEnum::SimpleAnnouncement,
+            AnnouncementReasonEnum::UpdateAvailable,
             None,
             endpoint,
         );
@@ -1537,13 +1537,14 @@ impl Node {
             })
             .await
             .map_err(|_| Error::ControllerStopped)?;
-        let (receivers, key) = rx.await.map_err(|_| Error::ControllerStopped)??;
+        let (receivers, key, max_report_interval) = rx.await.map_err(|_| Error::ControllerStopped)??;
         Ok(crate::subscription::Subscription {
             rx: receivers.report_rx,
             ctrl_rx: receivers.ctrl_rx,
             tx: self.tx.clone(),
             key,
             cancelled: false,
+            max_report_interval
         })
     }
 }
