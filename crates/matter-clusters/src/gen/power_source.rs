@@ -93,6 +93,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `PowerSource` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// Wired (WIRED).
         const WIRED = 1 << 0;
@@ -107,6 +109,7 @@ bitflags::bitflags! {
 
 /// `BatApprovedChemistryEnum` (enum16).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BatApprovedChemistryEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -263,6 +266,7 @@ impl BatApprovedChemistryEnum {
 
 /// `BatChargeFaultEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BatChargeFaultEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -331,6 +335,7 @@ impl BatChargeFaultEnum {
 
 /// `BatChargeLevelEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BatChargeLevelEnum {
     /// Ok = 0.
     Ok,
@@ -367,6 +372,7 @@ impl BatChargeLevelEnum {
 
 /// `BatChargeStateEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BatChargeStateEnum {
     /// Unknown = 0.
     Unknown,
@@ -407,6 +413,7 @@ impl BatChargeStateEnum {
 
 /// `BatCommonDesignationEnum` (enum16).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[allow(non_camel_case_types)]
 pub enum BatCommonDesignationEnum {
     /// Unspecified = 0.
@@ -756,6 +763,7 @@ impl BatCommonDesignationEnum {
 
 /// `BatFaultEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BatFaultEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -792,6 +800,7 @@ impl BatFaultEnum {
 
 /// `BatReplaceabilityEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BatReplaceabilityEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -832,6 +841,7 @@ impl BatReplaceabilityEnum {
 
 /// `PowerSourceStatusEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PowerSourceStatusEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -872,6 +882,7 @@ impl PowerSourceStatusEnum {
 
 /// `WiredCurrentTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum WiredCurrentTypeEnum {
     /// Ac = 0.
     Ac,
@@ -904,6 +915,7 @@ impl WiredCurrentTypeEnum {
 
 /// `WiredFaultEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum WiredFaultEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -955,6 +967,17 @@ pub fn decode_status(tlv: &[u8]) -> Result<PowerSourceStatusEnum, ClusterError> 
     }
 }
 
+/// Encode the `Status` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_status(value: PowerSourceStatusEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `Order` attribute value.
 ///
 /// # Errors
@@ -968,6 +991,17 @@ pub fn decode_order(tlv: &[u8]) -> Result<u8, ClusterError> {
         }) => Ok(u8::try_from(v).map_err(|_| ClusterError::InvalidLength("Order"))?),
         _ => Err(ClusterError::UnexpectedType { context: "Order" }),
     }
+}
+
+/// Encode the `Order` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_order(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Description` attribute value.
@@ -985,6 +1019,17 @@ pub fn decode_description(tlv: &[u8]) -> Result<String, ClusterError> {
             context: "Description",
         }),
     }
+}
+
+/// Encode the `Description` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_description(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `WiredAssessedInputVoltage` attribute value.
@@ -1009,6 +1054,22 @@ pub fn decode_wired_assessed_input_voltage(tlv: &[u8]) -> Result<Nullable<u32>, 
     }
 }
 
+/// Encode the `WiredAssessedInputVoltage` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_wired_assessed_input_voltage(value: Nullable<u32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `WiredAssessedInputFrequency` attribute value.
 ///
 /// # Errors
@@ -1031,6 +1092,22 @@ pub fn decode_wired_assessed_input_frequency(tlv: &[u8]) -> Result<Nullable<u16>
     }
 }
 
+/// Encode the `WiredAssessedInputFrequency` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_wired_assessed_input_frequency(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `WiredCurrentType` attribute value.
 ///
 /// # Errors
@@ -1048,6 +1125,17 @@ pub fn decode_wired_current_type(tlv: &[u8]) -> Result<WiredCurrentTypeEnum, Clu
             context: "WiredCurrentType",
         }),
     }
+}
+
+/// Encode the `WiredCurrentType` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_wired_current_type(value: WiredCurrentTypeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `WiredAssessedCurrent` attribute value.
@@ -1072,6 +1160,22 @@ pub fn decode_wired_assessed_current(tlv: &[u8]) -> Result<Nullable<u32>, Cluste
     }
 }
 
+/// Encode the `WiredAssessedCurrent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_wired_assessed_current(value: Nullable<u32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `WiredNominalVoltage` attribute value.
 ///
 /// # Errors
@@ -1087,6 +1191,17 @@ pub fn decode_wired_nominal_voltage(tlv: &[u8]) -> Result<u32, ClusterError> {
             context: "WiredNominalVoltage",
         }),
     }
+}
+
+/// Encode the `WiredNominalVoltage` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_wired_nominal_voltage(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `WiredMaximumCurrent` attribute value.
@@ -1106,6 +1221,17 @@ pub fn decode_wired_maximum_current(tlv: &[u8]) -> Result<u32, ClusterError> {
     }
 }
 
+/// Encode the `WiredMaximumCurrent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_wired_maximum_current(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `WiredPresent` attribute value.
 ///
 /// # Errors
@@ -1121,6 +1247,17 @@ pub fn decode_wired_present(tlv: &[u8]) -> Result<bool, ClusterError> {
             context: "WiredPresent",
         }),
     }
+}
+
+/// Encode the `WiredPresent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_wired_present(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ActiveWiredFaults` attribute value.
@@ -1181,6 +1318,22 @@ pub fn decode_bat_voltage(tlv: &[u8]) -> Result<Nullable<u32>, ClusterError> {
     }
 }
 
+/// Encode the `BatVoltage` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_voltage(value: Nullable<u32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `BatPercentRemaining` attribute value.
 ///
 /// # Errors
@@ -1201,6 +1354,22 @@ pub fn decode_bat_percent_remaining(tlv: &[u8]) -> Result<Nullable<u8>, ClusterE
             context: "BatPercentRemaining",
         }),
     }
+}
+
+/// Encode the `BatPercentRemaining` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_percent_remaining(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `BatTimeRemaining` attribute value.
@@ -1227,6 +1396,22 @@ pub fn decode_bat_time_remaining(tlv: &[u8]) -> Result<Nullable<u32>, ClusterErr
     }
 }
 
+/// Encode the `BatTimeRemaining` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_time_remaining(value: Nullable<u32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `BatChargeLevel` attribute value.
 ///
 /// # Errors
@@ -1246,6 +1431,17 @@ pub fn decode_bat_charge_level(tlv: &[u8]) -> Result<BatChargeLevelEnum, Cluster
     }
 }
 
+/// Encode the `BatChargeLevel` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_charge_level(value: BatChargeLevelEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `BatReplacementNeeded` attribute value.
 ///
 /// # Errors
@@ -1261,6 +1457,17 @@ pub fn decode_bat_replacement_needed(tlv: &[u8]) -> Result<bool, ClusterError> {
             context: "BatReplacementNeeded",
         }),
     }
+}
+
+/// Encode the `BatReplacementNeeded` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_replacement_needed(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `BatReplaceability` attribute value.
@@ -1282,6 +1489,17 @@ pub fn decode_bat_replaceability(tlv: &[u8]) -> Result<BatReplaceabilityEnum, Cl
     }
 }
 
+/// Encode the `BatReplaceability` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_replaceability(value: BatReplaceabilityEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `BatPresent` attribute value.
 ///
 /// # Errors
@@ -1297,6 +1515,17 @@ pub fn decode_bat_present(tlv: &[u8]) -> Result<bool, ClusterError> {
             context: "BatPresent",
         }),
     }
+}
+
+/// Encode the `BatPresent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_present(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ActiveBatFaults` attribute value.
@@ -1352,6 +1581,17 @@ pub fn decode_bat_replacement_description(tlv: &[u8]) -> Result<String, ClusterE
     }
 }
 
+/// Encode the `BatReplacementDescription` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_replacement_description(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `BatCommonDesignation` attribute value.
 ///
 /// # Errors
@@ -1371,6 +1611,17 @@ pub fn decode_bat_common_designation(tlv: &[u8]) -> Result<BatCommonDesignationE
     }
 }
 
+/// Encode the `BatCommonDesignation` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_common_designation(value: BatCommonDesignationEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `BatAnsiDesignation` attribute value.
 ///
 /// # Errors
@@ -1388,6 +1639,17 @@ pub fn decode_bat_ansi_designation(tlv: &[u8]) -> Result<String, ClusterError> {
     }
 }
 
+/// Encode the `BatAnsiDesignation` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_ansi_designation(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `BatIecDesignation` attribute value.
 ///
 /// # Errors
@@ -1403,6 +1665,17 @@ pub fn decode_bat_iec_designation(tlv: &[u8]) -> Result<String, ClusterError> {
             context: "BatIecDesignation",
         }),
     }
+}
+
+/// Encode the `BatIecDesignation` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_iec_designation(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `BatApprovedChemistry` attribute value.
@@ -1424,6 +1697,17 @@ pub fn decode_bat_approved_chemistry(tlv: &[u8]) -> Result<BatApprovedChemistryE
     }
 }
 
+/// Encode the `BatApprovedChemistry` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_approved_chemistry(value: BatApprovedChemistryEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `BatCapacity` attribute value.
 ///
 /// # Errors
@@ -1439,6 +1723,17 @@ pub fn decode_bat_capacity(tlv: &[u8]) -> Result<u32, ClusterError> {
             context: "BatCapacity",
         }),
     }
+}
+
+/// Encode the `BatCapacity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_capacity(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `BatQuantity` attribute value.
@@ -1458,6 +1753,17 @@ pub fn decode_bat_quantity(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `BatQuantity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_quantity(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `BatChargeState` attribute value.
 ///
 /// # Errors
@@ -1475,6 +1781,17 @@ pub fn decode_bat_charge_state(tlv: &[u8]) -> Result<BatChargeStateEnum, Cluster
             context: "BatChargeState",
         }),
     }
+}
+
+/// Encode the `BatChargeState` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_charge_state(value: BatChargeStateEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `BatTimeToFullCharge` attribute value.
@@ -1499,6 +1816,22 @@ pub fn decode_bat_time_to_full_charge(tlv: &[u8]) -> Result<Nullable<u32>, Clust
     }
 }
 
+/// Encode the `BatTimeToFullCharge` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_time_to_full_charge(value: Nullable<u32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `BatFunctionalWhileCharging` attribute value.
 ///
 /// # Errors
@@ -1514,6 +1847,17 @@ pub fn decode_bat_functional_while_charging(tlv: &[u8]) -> Result<bool, ClusterE
             context: "BatFunctionalWhileCharging",
         }),
     }
+}
+
+/// Encode the `BatFunctionalWhileCharging` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_functional_while_charging(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `BatChargingCurrent` attribute value.
@@ -1536,6 +1880,22 @@ pub fn decode_bat_charging_current(tlv: &[u8]) -> Result<Nullable<u32>, ClusterE
             context: "BatChargingCurrent",
         }),
     }
+}
+
+/// Encode the `BatChargingCurrent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_bat_charging_current(value: Nullable<u32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `ActiveBatChargeFaults` attribute value.

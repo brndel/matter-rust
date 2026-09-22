@@ -134,6 +134,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `Thermostat` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// Heating (HEAT).
         const HEAT = 1 << 0;
@@ -156,6 +158,7 @@ bitflags::bitflags! {
 
 /// `ACCapacityFormatEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ACCapacityFormatEnum {
     /// BtUh = 0.
     BtUh,
@@ -184,6 +187,7 @@ impl ACCapacityFormatEnum {
 
 /// `ACCompressorTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ACCompressorTypeEnum {
     /// Unknown = 0.
     Unknown,
@@ -225,6 +229,8 @@ impl ACCompressorTypeEnum {
 bitflags::bitflags! {
     /// `ACErrorCodeBitmap` (map32).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct ACErrorCodeBitmap: u32 {
         /// CompressorFail.
         const COMPRESSOR_FAIL = 1 << 0;
@@ -241,6 +247,7 @@ bitflags::bitflags! {
 
 /// `ACLouverPositionEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ACLouverPositionEnum {
     /// Closed = 1.
     Closed,
@@ -285,6 +292,7 @@ impl ACLouverPositionEnum {
 
 /// `ACRefrigerantTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ACRefrigerantTypeEnum {
     /// Unknown = 0.
     Unknown,
@@ -325,6 +333,7 @@ impl ACRefrigerantTypeEnum {
 
 /// `ACTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ACTypeEnum {
     /// Unknown = 0.
     Unknown,
@@ -369,6 +378,7 @@ impl ACTypeEnum {
 
 /// `ControlSequenceOfOperationEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ControlSequenceOfOperationEnum {
     /// CoolingOnly = 0.
     CoolingOnly,
@@ -418,6 +428,8 @@ impl ControlSequenceOfOperationEnum {
 bitflags::bitflags! {
     /// `OccupancyBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct OccupancyBitmap: u8 {
         /// Occupied.
         const OCCUPIED = 1 << 0;
@@ -426,6 +438,7 @@ bitflags::bitflags! {
 
 /// `PresetScenarioEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PresetScenarioEnum {
     /// Occupied = 1.
     Occupied,
@@ -478,6 +491,7 @@ impl PresetScenarioEnum {
 
 /// `PresetStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct PresetStruct {
     /// Field PresetHandle (tag 0).
@@ -497,6 +511,8 @@ pub struct PresetStruct {
 bitflags::bitflags! {
     /// `PresetTypeFeaturesBitmap` (map16).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct PresetTypeFeaturesBitmap: u16 {
         /// Automatic.
         const AUTOMATIC = 1 << 0;
@@ -507,6 +523,7 @@ bitflags::bitflags! {
 
 /// `PresetTypeStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct PresetTypeStruct {
     /// Field PresetScenario (tag 0).
@@ -520,6 +537,8 @@ pub struct PresetTypeStruct {
 bitflags::bitflags! {
     /// `RelayStateBitmap` (map16).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct RelayStateBitmap: u16 {
         /// Heat.
         const HEAT = 1 << 0;
@@ -541,6 +560,8 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// `RemoteSensingBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct RemoteSensingBitmap: u8 {
         /// LocalTemperature.
         const LOCAL_TEMPERATURE = 1 << 0;
@@ -554,6 +575,8 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// `ScheduleDayOfWeekBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct ScheduleDayOfWeekBitmap: u8 {
         /// Sunday.
         const SUNDAY = 1 << 0;
@@ -577,6 +600,8 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// `ScheduleModeBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct ScheduleModeBitmap: u8 {
         /// HeatSetpointPresent.
         const HEAT_SETPOINT_PRESENT = 1 << 0;
@@ -587,6 +612,7 @@ bitflags::bitflags! {
 
 /// `ScheduleStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct ScheduleStruct {
     /// Field ScheduleHandle (tag 0).
@@ -605,6 +631,7 @@ pub struct ScheduleStruct {
 
 /// `ScheduleTransitionStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct ScheduleTransitionStruct {
     /// Field DayOfWeek (tag 0).
@@ -624,6 +651,8 @@ pub struct ScheduleTransitionStruct {
 bitflags::bitflags! {
     /// `ScheduleTypeFeaturesBitmap` (map16).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct ScheduleTypeFeaturesBitmap: u16 {
         /// SupportsPresets.
         const SUPPORTS_PRESETS = 1 << 0;
@@ -638,6 +667,7 @@ bitflags::bitflags! {
 
 /// `ScheduleTypeStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct ScheduleTypeStruct {
     /// Field SystemMode (tag 0).
@@ -650,6 +680,7 @@ pub struct ScheduleTypeStruct {
 
 /// `SetpointChangeSourceEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SetpointChangeSourceEnum {
     /// Manual = 0.
     Manual,
@@ -686,6 +717,7 @@ impl SetpointChangeSourceEnum {
 
 /// `SetpointRaiseLowerModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SetpointRaiseLowerModeEnum {
     /// Heat = 0.
     Heat,
@@ -722,6 +754,7 @@ impl SetpointRaiseLowerModeEnum {
 
 /// `StartOfWeekEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StartOfWeekEnum {
     /// Sunday = 0.
     Sunday,
@@ -774,6 +807,7 @@ impl StartOfWeekEnum {
 
 /// `SystemModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SystemModeEnum {
     /// Off = 0.
     Off,
@@ -834,6 +868,7 @@ impl SystemModeEnum {
 
 /// `TemperatureSetpointHoldEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TemperatureSetpointHoldEnum {
     /// SetpointHoldOff = 0.
     SetpointHoldOff,
@@ -866,6 +901,7 @@ impl TemperatureSetpointHoldEnum {
 
 /// `ThermostatAttributeStatusEntryStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct ThermostatAttributeStatusEntryStruct {
     /// Field AttributeId (tag 0).
@@ -876,6 +912,7 @@ pub struct ThermostatAttributeStatusEntryStruct {
 
 /// `ThermostatRunningModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ThermostatRunningModeEnum {
     /// Off = 0.
     Off,
@@ -912,6 +949,7 @@ impl ThermostatRunningModeEnum {
 
 /// `WeeklyScheduleTransitionStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct WeeklyScheduleTransitionStruct {
     /// Field TransitionTime (tag 0).
@@ -1729,6 +1767,22 @@ pub fn decode_local_temperature(tlv: &[u8]) -> Result<Nullable<i16>, ClusterErro
     }
 }
 
+/// Encode the `LocalTemperature` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_local_temperature(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `OutdoorTemperature` attribute value.
 ///
 /// # Errors
@@ -1751,6 +1805,22 @@ pub fn decode_outdoor_temperature(tlv: &[u8]) -> Result<Nullable<i16>, ClusterEr
     }
 }
 
+/// Encode the `OutdoorTemperature` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_outdoor_temperature(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Occupancy` attribute value.
 ///
 /// # Errors
@@ -1768,6 +1838,17 @@ pub fn decode_occupancy(tlv: &[u8]) -> Result<OccupancyBitmap, ClusterError> {
             context: "Occupancy",
         }),
     }
+}
+
+/// Encode the `Occupancy` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_occupancy(value: OccupancyBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `AbsMinHeatSetpointLimit` attribute value.
@@ -1790,6 +1871,17 @@ pub fn decode_abs_min_heat_setpoint_limit(tlv: &[u8]) -> Result<i16, ClusterErro
     }
 }
 
+/// Encode the `AbsMinHeatSetpointLimit` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_abs_min_heat_setpoint_limit(value: i16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_int(Tag::Anonymous, i64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `AbsMaxHeatSetpointLimit` attribute value.
 ///
 /// # Errors
@@ -1808,6 +1900,17 @@ pub fn decode_abs_max_heat_setpoint_limit(tlv: &[u8]) -> Result<i16, ClusterErro
             context: "AbsMaxHeatSetpointLimit",
         }),
     }
+}
+
+/// Encode the `AbsMaxHeatSetpointLimit` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_abs_max_heat_setpoint_limit(value: i16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_int(Tag::Anonymous, i64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `AbsMinCoolSetpointLimit` attribute value.
@@ -1830,6 +1933,17 @@ pub fn decode_abs_min_cool_setpoint_limit(tlv: &[u8]) -> Result<i16, ClusterErro
     }
 }
 
+/// Encode the `AbsMinCoolSetpointLimit` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_abs_min_cool_setpoint_limit(value: i16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_int(Tag::Anonymous, i64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `AbsMaxCoolSetpointLimit` attribute value.
 ///
 /// # Errors
@@ -1848,6 +1962,17 @@ pub fn decode_abs_max_cool_setpoint_limit(tlv: &[u8]) -> Result<i16, ClusterErro
             context: "AbsMaxCoolSetpointLimit",
         }),
     }
+}
+
+/// Encode the `AbsMaxCoolSetpointLimit` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_abs_max_cool_setpoint_limit(value: i16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_int(Tag::Anonymous, i64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `LocalTemperatureCalibration` attribute value.
@@ -2253,6 +2378,17 @@ pub fn decode_thermostat_running_mode(
     }
 }
 
+/// Encode the `ThermostatRunningMode` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_thermostat_running_mode(value: ThermostatRunningModeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `TemperatureSetpointHold` attribute value.
 ///
 /// # Errors
@@ -2344,6 +2480,17 @@ pub fn decode_thermostat_running_state(tlv: &[u8]) -> Result<RelayStateBitmap, C
     }
 }
 
+/// Encode the `ThermostatRunningState` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_thermostat_running_state(value: RelayStateBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `SetpointChangeSource` attribute value.
 ///
 /// # Errors
@@ -2361,6 +2508,17 @@ pub fn decode_setpoint_change_source(tlv: &[u8]) -> Result<SetpointChangeSourceE
             context: "SetpointChangeSource",
         }),
     }
+}
+
+/// Encode the `SetpointChangeSource` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_setpoint_change_source(value: SetpointChangeSourceEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `SetpointChangeAmount` attribute value.
@@ -2385,6 +2543,22 @@ pub fn decode_setpoint_change_amount(tlv: &[u8]) -> Result<Nullable<i16>, Cluste
     }
 }
 
+/// Encode the `SetpointChangeAmount` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_setpoint_change_amount(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `SetpointChangeSourceTimestamp` attribute value.
 ///
 /// # Errors
@@ -2401,6 +2575,17 @@ pub fn decode_setpoint_change_source_timestamp(tlv: &[u8]) -> Result<u32, Cluste
             context: "SetpointChangeSourceTimestamp",
         }),
     }
+}
+
+/// Encode the `SetpointChangeSourceTimestamp` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_setpoint_change_source_timestamp(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `EmergencyHeatDelta` attribute value.
@@ -2631,6 +2816,22 @@ pub fn decode_ac_coil_temperature(tlv: &[u8]) -> Result<Nullable<i16>, ClusterEr
     }
 }
 
+/// Encode the `AcCoilTemperature` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_ac_coil_temperature(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `AcCapacityFormat` attribute value.
 ///
 /// # Errors
@@ -2750,6 +2951,17 @@ pub fn decode_number_of_presets(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `NumberOfPresets` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_presets(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `NumberOfSchedules` attribute value.
 ///
 /// # Errors
@@ -2765,6 +2977,17 @@ pub fn decode_number_of_schedules(tlv: &[u8]) -> Result<u8, ClusterError> {
             context: "NumberOfSchedules",
         }),
     }
+}
+
+/// Encode the `NumberOfSchedules` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_schedules(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `NumberOfScheduleTransitions` attribute value.
@@ -2783,6 +3006,17 @@ pub fn decode_number_of_schedule_transitions(tlv: &[u8]) -> Result<u8, ClusterEr
             context: "NumberOfScheduleTransitions",
         }),
     }
+}
+
+/// Encode the `NumberOfScheduleTransitions` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_schedule_transitions(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `NumberOfScheduleTransitionPerDay` attribute value.
@@ -2809,6 +3043,22 @@ pub fn decode_number_of_schedule_transition_per_day(
     }
 }
 
+/// Encode the `NumberOfScheduleTransitionPerDay` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_schedule_transition_per_day(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `ActivePresetHandle` attribute value.
 ///
 /// # Errors
@@ -2829,6 +3079,22 @@ pub fn decode_active_preset_handle(tlv: &[u8]) -> Result<Nullable<Vec<u8>>, Clus
     }
 }
 
+/// Encode the `ActivePresetHandle` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_active_preset_handle(value: Nullable<Vec<u8>>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_bytes(Tag::Anonymous, &value)
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `ActiveScheduleHandle` attribute value.
 ///
 /// # Errors
@@ -2847,6 +3113,22 @@ pub fn decode_active_schedule_handle(tlv: &[u8]) -> Result<Nullable<Vec<u8>>, Cl
             context: "ActiveScheduleHandle",
         }),
     }
+}
+
+/// Encode the `ActiveScheduleHandle` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_active_schedule_handle(value: Nullable<Vec<u8>>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_bytes(Tag::Anonymous, &value)
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `Presets` attribute value.
@@ -2937,6 +3219,22 @@ pub fn decode_setpoint_hold_expiry_timestamp(tlv: &[u8]) -> Result<Nullable<u32>
             context: "SetpointHoldExpiryTimestamp",
         }),
     }
+}
+
+/// Encode the `SetpointHoldExpiryTimestamp` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_setpoint_hold_expiry_timestamp(value: Nullable<u32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Encode the `SetpointRaiseLower` command request payload.

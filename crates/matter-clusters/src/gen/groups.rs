@@ -52,6 +52,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `Groups` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// GroupNames (GN).
         const GN = 1 << 0;
@@ -61,6 +63,8 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// `NameSupportBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct NameSupportBitmap: u8 {
         /// GroupNames.
         const GROUP_NAMES = 1 << 7;
@@ -84,6 +88,17 @@ pub fn decode_name_support(tlv: &[u8]) -> Result<NameSupportBitmap, ClusterError
             context: "NameSupport",
         }),
     }
+}
+
+/// Encode the `NameSupport` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_name_support(value: NameSupportBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Encode the `AddGroup` command request payload.

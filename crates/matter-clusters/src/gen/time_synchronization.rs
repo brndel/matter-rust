@@ -68,6 +68,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `TimeSynchronization` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// TimeZone (TZ).
         const TZ = 1 << 0;
@@ -82,6 +84,7 @@ bitflags::bitflags! {
 
 /// `DSTOffsetStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DSTOffsetStruct {
     /// Field Offset (tag 0).
     pub offset: i32,
@@ -93,6 +96,7 @@ pub struct DSTOffsetStruct {
 
 /// `FabricScopedTrustedTimeSourceStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FabricScopedTrustedTimeSourceStruct {
     /// Field NodeId (tag 0).
     pub node_id: u64,
@@ -102,6 +106,7 @@ pub struct FabricScopedTrustedTimeSourceStruct {
 
 /// `GranularityEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GranularityEnum {
     /// NoTimeGranularity = 0.
     NoTimeGranularity,
@@ -146,6 +151,7 @@ impl GranularityEnum {
 
 /// `StatusCodeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StatusCodeEnum {
     /// TimeNotAccepted = 2.
     TimeNotAccepted,
@@ -174,6 +180,7 @@ impl StatusCodeEnum {
 
 /// `TimeSourceEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TimeSourceEnum {
     /// None = 0.
     None,
@@ -266,6 +273,7 @@ impl TimeSourceEnum {
 
 /// `TimeZoneDatabaseEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TimeZoneDatabaseEnum {
     /// Full = 0.
     Full,
@@ -302,6 +310,7 @@ impl TimeZoneDatabaseEnum {
 
 /// `TimeZoneStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TimeZoneStruct {
     /// Field Offset (tag 0).
     pub offset: i32,
@@ -313,6 +322,7 @@ pub struct TimeZoneStruct {
 
 /// `TrustedTimeSourceStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct TrustedTimeSourceStruct {
     /// Field FabricIndex (tag 0).
@@ -698,6 +708,22 @@ pub fn decode_utc_time(tlv: &[u8]) -> Result<Nullable<u64>, ClusterError> {
     }
 }
 
+/// Encode the `UtcTime` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_utc_time(value: Nullable<u64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Granularity` attribute value.
 ///
 /// # Errors
@@ -717,6 +743,17 @@ pub fn decode_granularity(tlv: &[u8]) -> Result<GranularityEnum, ClusterError> {
     }
 }
 
+/// Encode the `Granularity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_granularity(value: GranularityEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `TimeSource` attribute value.
 ///
 /// # Errors
@@ -734,6 +771,17 @@ pub fn decode_time_source(tlv: &[u8]) -> Result<TimeSourceEnum, ClusterError> {
             context: "TimeSource",
         }),
     }
+}
+
+/// Encode the `TimeSource` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_time_source(value: TimeSourceEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `TrustedTimeSource` attribute value.
@@ -778,6 +826,22 @@ pub fn decode_default_ntp(tlv: &[u8]) -> Result<Nullable<String>, ClusterError> 
             context: "DefaultNtp",
         }),
     }
+}
+
+/// Encode the `DefaultNtp` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_default_ntp(value: Nullable<String>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_utf8(Tag::Anonymous, &value)
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `TimeZone` attribute value.
@@ -874,6 +938,22 @@ pub fn decode_local_time(tlv: &[u8]) -> Result<Nullable<u64>, ClusterError> {
     }
 }
 
+/// Encode the `LocalTime` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_local_time(value: Nullable<u64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `TimeZoneDatabase` attribute value.
 ///
 /// # Errors
@@ -893,6 +973,17 @@ pub fn decode_time_zone_database(tlv: &[u8]) -> Result<TimeZoneDatabaseEnum, Clu
     }
 }
 
+/// Encode the `TimeZoneDatabase` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_time_zone_database(value: TimeZoneDatabaseEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `NtpServerAvailable` attribute value.
 ///
 /// # Errors
@@ -908,6 +999,17 @@ pub fn decode_ntp_server_available(tlv: &[u8]) -> Result<bool, ClusterError> {
             context: "NtpServerAvailable",
         }),
     }
+}
+
+/// Encode the `NtpServerAvailable` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_ntp_server_available(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `TimeZoneListMaxSize` attribute value.
@@ -927,6 +1029,17 @@ pub fn decode_time_zone_list_max_size(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `TimeZoneListMaxSize` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_time_zone_list_max_size(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `DstOffsetListMaxSize` attribute value.
 ///
 /// # Errors
@@ -944,6 +1057,17 @@ pub fn decode_dst_offset_list_max_size(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `DstOffsetListMaxSize` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_dst_offset_list_max_size(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `SupportsDnsResolve` attribute value.
 ///
 /// # Errors
@@ -959,6 +1083,17 @@ pub fn decode_supports_dns_resolve(tlv: &[u8]) -> Result<bool, ClusterError> {
             context: "SupportsDnsResolve",
         }),
     }
+}
+
+/// Encode the `SupportsDnsResolve` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_supports_dns_resolve(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Encode the `SetUtcTime` command request payload.

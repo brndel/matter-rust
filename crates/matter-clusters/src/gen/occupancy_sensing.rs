@@ -57,6 +57,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `OccupancySensing` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// Other (OTHER).
         const OTHER = 1 << 0;
@@ -79,6 +81,7 @@ bitflags::bitflags! {
 
 /// `HoldTimeLimitsStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct HoldTimeLimitsStruct {
     /// Field HoldTimeMin (tag 0).
@@ -92,6 +95,8 @@ pub struct HoldTimeLimitsStruct {
 bitflags::bitflags! {
     /// `OccupancyBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct OccupancyBitmap: u8 {
         /// Occupied.
         const OCCUPIED = 1 << 0;
@@ -101,6 +106,8 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// `OccupancySensorTypeBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct OccupancySensorTypeBitmap: u8 {
         /// Pir.
         const PIR = 1 << 0;
@@ -113,6 +120,7 @@ bitflags::bitflags! {
 
 /// `OccupancySensorTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OccupancySensorTypeEnum {
     /// Pir = 0.
     Pir,
@@ -263,6 +271,17 @@ pub fn decode_occupancy(tlv: &[u8]) -> Result<OccupancyBitmap, ClusterError> {
     }
 }
 
+/// Encode the `Occupancy` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_occupancy(value: OccupancyBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `OccupancySensorType` attribute value.
 ///
 /// # Errors
@@ -280,6 +299,17 @@ pub fn decode_occupancy_sensor_type(tlv: &[u8]) -> Result<OccupancySensorTypeEnu
             context: "OccupancySensorType",
         }),
     }
+}
+
+/// Encode the `OccupancySensorType` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_occupancy_sensor_type(value: OccupancySensorTypeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `OccupancySensorTypeBitmap` attribute value.
@@ -302,6 +332,17 @@ pub fn decode_occupancy_sensor_type_bitmap(
             context: "OccupancySensorTypeBitmap",
         }),
     }
+}
+
+/// Encode the `OccupancySensorTypeBitmap` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_occupancy_sensor_type_bitmap(value: OccupancySensorTypeBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `HoldTime` attribute value.

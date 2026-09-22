@@ -71,9 +71,7 @@ pub fn emit_codecs(s: &mut String, c: &Cluster) {
     }
     for a in &c.attributes {
         emit_attr_decoder(s, a, &dts);
-        if a.writable {
-            emit_attr_encoder(s, a, &dts);
-        }
+        emit_attr_encoder(s, a, &dts);
     }
     for cmd in &c.commands {
         if cmd.direction == "request" {

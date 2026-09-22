@@ -152,6 +152,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `DoorLock` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// PinCredential (PIN).
         const PIN = 1 << 0;
@@ -184,6 +186,7 @@ bitflags::bitflags! {
 
 /// `AlarmCodeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AlarmCodeEnum {
     /// LockJammed = 0.
     LockJammed,
@@ -241,6 +244,8 @@ impl AlarmCodeEnum {
 bitflags::bitflags! {
     /// `AlarmMaskBitmap` (map16).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct AlarmMaskBitmap: u16 {
         /// LockJammed.
         const LOCK_JAMMED = 1 << 0;
@@ -260,6 +265,8 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// `ConfigurationRegisterBitmap` (map16).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct ConfigurationRegisterBitmap: u16 {
         /// LocalProgramming.
         const LOCAL_PROGRAMMING = 1 << 0;
@@ -278,6 +285,7 @@ bitflags::bitflags! {
 
 /// `CredentialRuleEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CredentialRuleEnum {
     /// Single = 0.
     Single,
@@ -315,6 +323,8 @@ impl CredentialRuleEnum {
 bitflags::bitflags! {
     /// `CredentialRulesBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct CredentialRulesBitmap: u8 {
         /// Single.
         const SINGLE = 1 << 0;
@@ -327,6 +337,7 @@ bitflags::bitflags! {
 
 /// `CredentialStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CredentialStruct {
     /// Field CredentialType (tag 0).
     pub credential_type: CredentialTypeEnum,
@@ -336,6 +347,7 @@ pub struct CredentialStruct {
 
 /// `CredentialTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CredentialTypeEnum {
     /// ProgrammingPin = 0.
     ProgrammingPin,
@@ -396,6 +408,7 @@ impl CredentialTypeEnum {
 
 /// `DataOperationTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DataOperationTypeEnum {
     /// Add = 0.
     Add,
@@ -433,6 +446,8 @@ impl DataOperationTypeEnum {
 bitflags::bitflags! {
     /// `DaysMaskBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct DaysMaskBitmap: u8 {
         /// Sunday.
         const SUNDAY = 1 << 0;
@@ -453,6 +468,7 @@ bitflags::bitflags! {
 
 /// `DoorStateEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DoorStateEnum {
     /// DoorOpen = 0.
     DoorOpen,
@@ -501,6 +517,7 @@ impl DoorStateEnum {
 
 /// `EventTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EventTypeEnum {
     /// Operation = 0.
     Operation,
@@ -537,6 +554,7 @@ impl EventTypeEnum {
 
 /// `LEDSettingEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LEDSettingEnum {
     /// NoLedSignal = 0.
     NoLedSignal,
@@ -574,6 +592,8 @@ impl LEDSettingEnum {
 bitflags::bitflags! {
     /// `LocalProgrammingFeaturesBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct LocalProgrammingFeaturesBitmap: u8 {
         /// AddUsersCredentialsSchedules.
         const ADD_USERS_CREDENTIALS_SCHEDULES = 1 << 0;
@@ -588,6 +608,7 @@ bitflags::bitflags! {
 
 /// `LockDataTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LockDataTypeEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -668,6 +689,7 @@ impl LockDataTypeEnum {
 
 /// `LockOperationTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LockOperationTypeEnum {
     /// Lock = 0.
     Lock,
@@ -712,6 +734,7 @@ impl LockOperationTypeEnum {
 
 /// `LockStateEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LockStateEnum {
     /// NotFullyLocked = 0.
     NotFullyLocked,
@@ -752,6 +775,7 @@ impl LockStateEnum {
 
 /// `LockTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LockTypeEnum {
     /// DeadBolt = 0.
     DeadBolt,
@@ -824,6 +848,7 @@ impl LockTypeEnum {
 
 /// `OperatingModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OperatingModeEnum {
     /// Normal = 0.
     Normal,
@@ -869,6 +894,8 @@ impl OperatingModeEnum {
 bitflags::bitflags! {
     /// `OperatingModesBitmap` (map16).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct OperatingModesBitmap: u16 {
         /// Normal.
         const NORMAL = 1 << 0;
@@ -885,6 +912,7 @@ bitflags::bitflags! {
 
 /// `OperationErrorEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OperationErrorEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -929,6 +957,7 @@ impl OperationErrorEnum {
 
 /// `OperationSourceEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OperationSourceEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -997,6 +1026,7 @@ impl OperationSourceEnum {
 
 /// `SoundVolumeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SoundVolumeEnum {
     /// Silent = 0.
     Silent,
@@ -1037,6 +1067,7 @@ impl SoundVolumeEnum {
 
 /// `StatusCodeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StatusCodeEnum {
     /// Duplicate = 2.
     Duplicate,
@@ -1069,6 +1100,7 @@ impl StatusCodeEnum {
 
 /// `UserStatusEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum UserStatusEnum {
     /// Available = 0.
     Available,
@@ -1105,6 +1137,7 @@ impl UserStatusEnum {
 
 /// `UserTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum UserTypeEnum {
     /// UnrestrictedUser = 0.
     UnrestrictedUser,
@@ -1272,6 +1305,22 @@ pub fn decode_lock_state(tlv: &[u8]) -> Result<Nullable<LockStateEnum>, ClusterE
     }
 }
 
+/// Encode the `LockState` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_lock_state(value: Nullable<LockStateEnum>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `LockType` attribute value.
 ///
 /// # Errors
@@ -1291,6 +1340,17 @@ pub fn decode_lock_type(tlv: &[u8]) -> Result<LockTypeEnum, ClusterError> {
     }
 }
 
+/// Encode the `LockType` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_lock_type(value: LockTypeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ActuatorEnabled` attribute value.
 ///
 /// # Errors
@@ -1306,6 +1366,17 @@ pub fn decode_actuator_enabled(tlv: &[u8]) -> Result<bool, ClusterError> {
             context: "ActuatorEnabled",
         }),
     }
+}
+
+/// Encode the `ActuatorEnabled` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_actuator_enabled(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `DoorState` attribute value.
@@ -1328,6 +1399,22 @@ pub fn decode_door_state(tlv: &[u8]) -> Result<Nullable<DoorStateEnum>, ClusterE
             context: "DoorState",
         }),
     }
+}
+
+/// Encode the `DoorState` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_door_state(value: Nullable<DoorStateEnum>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `DoorOpenEvents` attribute value.
@@ -1432,6 +1519,17 @@ pub fn decode_number_of_total_users_supported(tlv: &[u8]) -> Result<u16, Cluster
     }
 }
 
+/// Encode the `NumberOfTotalUsersSupported` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_total_users_supported(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `NumberOfPinUsersSupported` attribute value.
 ///
 /// # Errors
@@ -1450,6 +1548,17 @@ pub fn decode_number_of_pin_users_supported(tlv: &[u8]) -> Result<u16, ClusterEr
     }
 }
 
+/// Encode the `NumberOfPinUsersSupported` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_pin_users_supported(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `NumberOfRfidUsersSupported` attribute value.
 ///
 /// # Errors
@@ -1466,6 +1575,17 @@ pub fn decode_number_of_rfid_users_supported(tlv: &[u8]) -> Result<u16, ClusterE
             context: "NumberOfRfidUsersSupported",
         }),
     }
+}
+
+/// Encode the `NumberOfRfidUsersSupported` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_rfid_users_supported(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `NumberOfWeekDaySchedulesSupportedPerUser` attribute value.
@@ -1489,6 +1609,17 @@ pub fn decode_number_of_week_day_schedules_supported_per_user(
     }
 }
 
+/// Encode the `NumberOfWeekDaySchedulesSupportedPerUser` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_week_day_schedules_supported_per_user(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `NumberOfYearDaySchedulesSupportedPerUser` attribute value.
 ///
 /// # Errors
@@ -1510,6 +1641,17 @@ pub fn decode_number_of_year_day_schedules_supported_per_user(
     }
 }
 
+/// Encode the `NumberOfYearDaySchedulesSupportedPerUser` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_year_day_schedules_supported_per_user(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `NumberOfHolidaySchedulesSupported` attribute value.
 ///
 /// # Errors
@@ -1526,6 +1668,17 @@ pub fn decode_number_of_holiday_schedules_supported(tlv: &[u8]) -> Result<u8, Cl
             context: "NumberOfHolidaySchedulesSupported",
         }),
     }
+}
+
+/// Encode the `NumberOfHolidaySchedulesSupported` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_holiday_schedules_supported(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `MaxPinCodeLength` attribute value.
@@ -1545,6 +1698,17 @@ pub fn decode_max_pin_code_length(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `MaxPinCodeLength` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_pin_code_length(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `MinPinCodeLength` attribute value.
 ///
 /// # Errors
@@ -1560,6 +1724,17 @@ pub fn decode_min_pin_code_length(tlv: &[u8]) -> Result<u8, ClusterError> {
             context: "MinPinCodeLength",
         }),
     }
+}
+
+/// Encode the `MinPinCodeLength` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_pin_code_length(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `MaxRfidCodeLength` attribute value.
@@ -1579,6 +1754,17 @@ pub fn decode_max_rfid_code_length(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `MaxRfidCodeLength` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_rfid_code_length(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `MinRfidCodeLength` attribute value.
 ///
 /// # Errors
@@ -1594,6 +1780,17 @@ pub fn decode_min_rfid_code_length(tlv: &[u8]) -> Result<u8, ClusterError> {
             context: "MinRfidCodeLength",
         }),
     }
+}
+
+/// Encode the `MinRfidCodeLength` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_rfid_code_length(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `CredentialRulesSupport` attribute value.
@@ -1615,6 +1812,17 @@ pub fn decode_credential_rules_support(tlv: &[u8]) -> Result<CredentialRulesBitm
     }
 }
 
+/// Encode the `CredentialRulesSupport` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_credential_rules_support(value: CredentialRulesBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `NumberOfCredentialsSupportedPerUser` attribute value.
 ///
 /// # Errors
@@ -1631,6 +1839,17 @@ pub fn decode_number_of_credentials_supported_per_user(tlv: &[u8]) -> Result<u8,
             context: "NumberOfCredentialsSupportedPerUser",
         }),
     }
+}
+
+/// Encode the `NumberOfCredentialsSupportedPerUser` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_credentials_supported_per_user(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Language` attribute value.
@@ -1798,6 +2017,17 @@ pub fn decode_supported_operating_modes(tlv: &[u8]) -> Result<OperatingModesBitm
     }
 }
 
+/// Encode the `SupportedOperatingModes` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_supported_operating_modes(value: OperatingModesBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `DefaultConfigurationRegister` attribute value.
 ///
 /// # Errors
@@ -1818,6 +2048,17 @@ pub fn decode_default_configuration_register(
             context: "DefaultConfigurationRegister",
         }),
     }
+}
+
+/// Encode the `DefaultConfigurationRegister` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_default_configuration_register(value: ConfigurationRegisterBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `EnableLocalProgramming` attribute value.

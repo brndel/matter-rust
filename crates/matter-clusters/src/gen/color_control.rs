@@ -172,6 +172,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `ColorControl` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// HueSaturation (HS).
         const HS = 1 << 0;
@@ -189,6 +191,8 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// `ColorCapabilitiesBitmap` (map16).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct ColorCapabilitiesBitmap: u16 {
         /// HueSaturation.
         const HUE_SATURATION = 1 << 0;
@@ -205,6 +209,7 @@ bitflags::bitflags! {
 
 /// `ColorLoopActionEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ColorLoopActionEnum {
     /// Deactivate = 0.
     Deactivate,
@@ -241,6 +246,7 @@ impl ColorLoopActionEnum {
 
 /// `ColorLoopDirectionEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ColorLoopDirectionEnum {
     /// Decrement = 0.
     Decrement,
@@ -273,6 +279,7 @@ impl ColorLoopDirectionEnum {
 
 /// `ColorModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ColorModeEnum {
     /// CurrentHueAndCurrentSaturation = 0.
     CurrentHueAndCurrentSaturation,
@@ -309,6 +316,7 @@ impl ColorModeEnum {
 
 /// `DirectionEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DirectionEnum {
     /// Shortest = 0.
     Shortest,
@@ -349,6 +357,7 @@ impl DirectionEnum {
 
 /// `DriftCompensationEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DriftCompensationEnum {
     /// None = 0.
     None,
@@ -393,6 +402,7 @@ impl DriftCompensationEnum {
 
 /// `EnhancedColorModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EnhancedColorModeEnum {
     /// CurrentHueAndCurrentSaturation = 0.
     CurrentHueAndCurrentSaturation,
@@ -433,6 +443,7 @@ impl EnhancedColorModeEnum {
 
 /// `MoveModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MoveModeEnum {
     /// Stop = 0.
     Stop,
@@ -470,6 +481,8 @@ impl MoveModeEnum {
 bitflags::bitflags! {
     /// `OptionsBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct OptionsBitmap: u8 {
         /// ExecuteIfOff.
         const EXECUTE_IF_OFF = 1 << 0;
@@ -478,6 +491,7 @@ bitflags::bitflags! {
 
 /// `StepModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StepModeEnum {
     /// Up = 1.
     Up,
@@ -511,6 +525,8 @@ impl StepModeEnum {
 bitflags::bitflags! {
     /// `UpdateFlagsBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct UpdateFlagsBitmap: u8 {
         /// UpdateAction.
         const UPDATE_ACTION = 1 << 0;
@@ -540,6 +556,17 @@ pub fn decode_current_hue(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `CurrentHue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_hue(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `CurrentSaturation` attribute value.
 ///
 /// # Errors
@@ -555,6 +582,17 @@ pub fn decode_current_saturation(tlv: &[u8]) -> Result<u8, ClusterError> {
             context: "CurrentSaturation",
         }),
     }
+}
+
+/// Encode the `CurrentSaturation` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_saturation(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `RemainingTime` attribute value.
@@ -574,6 +612,17 @@ pub fn decode_remaining_time(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `RemainingTime` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_remaining_time(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `CurrentX` attribute value.
 ///
 /// # Errors
@@ -591,6 +640,17 @@ pub fn decode_current_x(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `CurrentX` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_x(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `CurrentY` attribute value.
 ///
 /// # Errors
@@ -606,6 +666,17 @@ pub fn decode_current_y(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "CurrentY",
         }),
     }
+}
+
+/// Encode the `CurrentY` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_y(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `DriftCompensation` attribute value.
@@ -627,6 +698,17 @@ pub fn decode_drift_compensation(tlv: &[u8]) -> Result<DriftCompensationEnum, Cl
     }
 }
 
+/// Encode the `DriftCompensation` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_drift_compensation(value: DriftCompensationEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `CompensationText` attribute value.
 ///
 /// # Errors
@@ -642,6 +724,17 @@ pub fn decode_compensation_text(tlv: &[u8]) -> Result<String, ClusterError> {
             context: "CompensationText",
         }),
     }
+}
+
+/// Encode the `CompensationText` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_compensation_text(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ColorTemperatureMireds` attribute value.
@@ -664,6 +757,17 @@ pub fn decode_color_temperature_mireds(tlv: &[u8]) -> Result<u16, ClusterError> 
     }
 }
 
+/// Encode the `ColorTemperatureMireds` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_temperature_mireds(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ColorMode` attribute value.
 ///
 /// # Errors
@@ -681,6 +785,17 @@ pub fn decode_color_mode(tlv: &[u8]) -> Result<ColorModeEnum, ClusterError> {
             context: "ColorMode",
         }),
     }
+}
+
+/// Encode the `ColorMode` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_mode(value: ColorModeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Options` attribute value.
@@ -735,6 +850,22 @@ pub fn decode_number_of_primaries(tlv: &[u8]) -> Result<Nullable<u8>, ClusterErr
     }
 }
 
+/// Encode the `NumberOfPrimaries` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_primaries(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Primary1X` attribute value.
 ///
 /// # Errors
@@ -752,6 +883,17 @@ pub fn decode_primary1_x(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `Primary1X` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary1_x(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `Primary1Y` attribute value.
 ///
 /// # Errors
@@ -767,6 +909,17 @@ pub fn decode_primary1_y(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "Primary1Y",
         }),
     }
+}
+
+/// Encode the `Primary1Y` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary1_y(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Primary1Intensity` attribute value.
@@ -793,6 +946,22 @@ pub fn decode_primary1_intensity(tlv: &[u8]) -> Result<Nullable<u8>, ClusterErro
     }
 }
 
+/// Encode the `Primary1Intensity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary1_intensity(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Primary2X` attribute value.
 ///
 /// # Errors
@@ -810,6 +979,17 @@ pub fn decode_primary2_x(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `Primary2X` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary2_x(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `Primary2Y` attribute value.
 ///
 /// # Errors
@@ -825,6 +1005,17 @@ pub fn decode_primary2_y(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "Primary2Y",
         }),
     }
+}
+
+/// Encode the `Primary2Y` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary2_y(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Primary2Intensity` attribute value.
@@ -851,6 +1042,22 @@ pub fn decode_primary2_intensity(tlv: &[u8]) -> Result<Nullable<u8>, ClusterErro
     }
 }
 
+/// Encode the `Primary2Intensity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary2_intensity(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Primary3X` attribute value.
 ///
 /// # Errors
@@ -868,6 +1075,17 @@ pub fn decode_primary3_x(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `Primary3X` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary3_x(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `Primary3Y` attribute value.
 ///
 /// # Errors
@@ -883,6 +1101,17 @@ pub fn decode_primary3_y(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "Primary3Y",
         }),
     }
+}
+
+/// Encode the `Primary3Y` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary3_y(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Primary3Intensity` attribute value.
@@ -909,6 +1138,22 @@ pub fn decode_primary3_intensity(tlv: &[u8]) -> Result<Nullable<u8>, ClusterErro
     }
 }
 
+/// Encode the `Primary3Intensity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary3_intensity(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Primary4X` attribute value.
 ///
 /// # Errors
@@ -926,6 +1171,17 @@ pub fn decode_primary4_x(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `Primary4X` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary4_x(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `Primary4Y` attribute value.
 ///
 /// # Errors
@@ -941,6 +1197,17 @@ pub fn decode_primary4_y(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "Primary4Y",
         }),
     }
+}
+
+/// Encode the `Primary4Y` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary4_y(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Primary4Intensity` attribute value.
@@ -967,6 +1234,22 @@ pub fn decode_primary4_intensity(tlv: &[u8]) -> Result<Nullable<u8>, ClusterErro
     }
 }
 
+/// Encode the `Primary4Intensity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary4_intensity(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Primary5X` attribute value.
 ///
 /// # Errors
@@ -984,6 +1267,17 @@ pub fn decode_primary5_x(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `Primary5X` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary5_x(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `Primary5Y` attribute value.
 ///
 /// # Errors
@@ -999,6 +1293,17 @@ pub fn decode_primary5_y(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "Primary5Y",
         }),
     }
+}
+
+/// Encode the `Primary5Y` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary5_y(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Primary5Intensity` attribute value.
@@ -1025,6 +1330,22 @@ pub fn decode_primary5_intensity(tlv: &[u8]) -> Result<Nullable<u8>, ClusterErro
     }
 }
 
+/// Encode the `Primary5Intensity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary5_intensity(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Primary6X` attribute value.
 ///
 /// # Errors
@@ -1042,6 +1363,17 @@ pub fn decode_primary6_x(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `Primary6X` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary6_x(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `Primary6Y` attribute value.
 ///
 /// # Errors
@@ -1057,6 +1389,17 @@ pub fn decode_primary6_y(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "Primary6Y",
         }),
     }
+}
+
+/// Encode the `Primary6Y` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary6_y(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Primary6Intensity` attribute value.
@@ -1083,6 +1426,22 @@ pub fn decode_primary6_intensity(tlv: &[u8]) -> Result<Nullable<u8>, ClusterErro
     }
 }
 
+/// Encode the `Primary6Intensity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_primary6_intensity(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `WhitePointX` attribute value.
 ///
 /// # Errors
@@ -1098,6 +1457,17 @@ pub fn decode_white_point_x(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "WhitePointX",
         }),
     }
+}
+
+/// Encode the `WhitePointX` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_white_point_x(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `WhitePointY` attribute value.
@@ -1117,6 +1487,17 @@ pub fn decode_white_point_y(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `WhitePointY` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_white_point_y(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ColorPointRx` attribute value.
 ///
 /// # Errors
@@ -1134,6 +1515,17 @@ pub fn decode_color_point_rx(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `ColorPointRx` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_point_rx(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ColorPointRy` attribute value.
 ///
 /// # Errors
@@ -1149,6 +1541,17 @@ pub fn decode_color_point_ry(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "ColorPointRy",
         }),
     }
+}
+
+/// Encode the `ColorPointRy` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_point_ry(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ColorPointRIntensity` attribute value.
@@ -1173,6 +1576,22 @@ pub fn decode_color_point_r_intensity(tlv: &[u8]) -> Result<Nullable<u8>, Cluste
     }
 }
 
+/// Encode the `ColorPointRIntensity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_point_r_intensity(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `ColorPointGx` attribute value.
 ///
 /// # Errors
@@ -1190,6 +1609,17 @@ pub fn decode_color_point_gx(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `ColorPointGx` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_point_gx(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ColorPointGy` attribute value.
 ///
 /// # Errors
@@ -1205,6 +1635,17 @@ pub fn decode_color_point_gy(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "ColorPointGy",
         }),
     }
+}
+
+/// Encode the `ColorPointGy` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_point_gy(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ColorPointGIntensity` attribute value.
@@ -1229,6 +1670,22 @@ pub fn decode_color_point_g_intensity(tlv: &[u8]) -> Result<Nullable<u8>, Cluste
     }
 }
 
+/// Encode the `ColorPointGIntensity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_point_g_intensity(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `ColorPointBx` attribute value.
 ///
 /// # Errors
@@ -1246,6 +1703,17 @@ pub fn decode_color_point_bx(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `ColorPointBx` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_point_bx(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ColorPointBy` attribute value.
 ///
 /// # Errors
@@ -1261,6 +1729,17 @@ pub fn decode_color_point_by(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "ColorPointBy",
         }),
     }
+}
+
+/// Encode the `ColorPointBy` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_point_by(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ColorPointBIntensity` attribute value.
@@ -1285,6 +1764,22 @@ pub fn decode_color_point_b_intensity(tlv: &[u8]) -> Result<Nullable<u8>, Cluste
     }
 }
 
+/// Encode the `ColorPointBIntensity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_point_b_intensity(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `EnhancedCurrentHue` attribute value.
 ///
 /// # Errors
@@ -1300,6 +1795,17 @@ pub fn decode_enhanced_current_hue(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "EnhancedCurrentHue",
         }),
     }
+}
+
+/// Encode the `EnhancedCurrentHue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_enhanced_current_hue(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `EnhancedColorMode` attribute value.
@@ -1321,6 +1827,17 @@ pub fn decode_enhanced_color_mode(tlv: &[u8]) -> Result<EnhancedColorModeEnum, C
     }
 }
 
+/// Encode the `EnhancedColorMode` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_enhanced_color_mode(value: EnhancedColorModeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ColorLoopActive` attribute value.
 ///
 /// # Errors
@@ -1336,6 +1853,17 @@ pub fn decode_color_loop_active(tlv: &[u8]) -> Result<u8, ClusterError> {
             context: "ColorLoopActive",
         }),
     }
+}
+
+/// Encode the `ColorLoopActive` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_loop_active(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ColorLoopDirection` attribute value.
@@ -1357,6 +1885,17 @@ pub fn decode_color_loop_direction(tlv: &[u8]) -> Result<ColorLoopDirectionEnum,
     }
 }
 
+/// Encode the `ColorLoopDirection` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_loop_direction(value: ColorLoopDirectionEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ColorLoopTime` attribute value.
 ///
 /// # Errors
@@ -1372,6 +1911,17 @@ pub fn decode_color_loop_time(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "ColorLoopTime",
         }),
     }
+}
+
+/// Encode the `ColorLoopTime` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_loop_time(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ColorLoopStartEnhancedHue` attribute value.
@@ -1392,6 +1942,17 @@ pub fn decode_color_loop_start_enhanced_hue(tlv: &[u8]) -> Result<u16, ClusterEr
     }
 }
 
+/// Encode the `ColorLoopStartEnhancedHue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_loop_start_enhanced_hue(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ColorLoopStoredEnhancedHue` attribute value.
 ///
 /// # Errors
@@ -1408,6 +1969,17 @@ pub fn decode_color_loop_stored_enhanced_hue(tlv: &[u8]) -> Result<u16, ClusterE
             context: "ColorLoopStoredEnhancedHue",
         }),
     }
+}
+
+/// Encode the `ColorLoopStoredEnhancedHue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_loop_stored_enhanced_hue(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ColorCapabilities` attribute value.
@@ -1429,6 +2001,17 @@ pub fn decode_color_capabilities(tlv: &[u8]) -> Result<ColorCapabilitiesBitmap, 
     }
 }
 
+/// Encode the `ColorCapabilities` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_capabilities(value: ColorCapabilitiesBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ColorTempPhysicalMinMireds` attribute value.
 ///
 /// # Errors
@@ -1445,6 +2028,17 @@ pub fn decode_color_temp_physical_min_mireds(tlv: &[u8]) -> Result<u16, ClusterE
             context: "ColorTempPhysicalMinMireds",
         }),
     }
+}
+
+/// Encode the `ColorTempPhysicalMinMireds` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_temp_physical_min_mireds(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ColorTempPhysicalMaxMireds` attribute value.
@@ -1465,6 +2059,17 @@ pub fn decode_color_temp_physical_max_mireds(tlv: &[u8]) -> Result<u16, ClusterE
     }
 }
 
+/// Encode the `ColorTempPhysicalMaxMireds` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_color_temp_physical_max_mireds(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `CoupleColorTempToLevelMinMireds` attribute value.
 ///
 /// # Errors
@@ -1481,6 +2086,17 @@ pub fn decode_couple_color_temp_to_level_min_mireds(tlv: &[u8]) -> Result<u16, C
             context: "CoupleColorTempToLevelMinMireds",
         }),
     }
+}
+
+/// Encode the `CoupleColorTempToLevelMinMireds` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_couple_color_temp_to_level_min_mireds(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `StartUpColorTemperatureMireds` attribute value.

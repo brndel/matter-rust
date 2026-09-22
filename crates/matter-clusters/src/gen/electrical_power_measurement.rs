@@ -67,6 +67,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `ElectricalPowerMeasurement` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// DirectCurrent (DIRC).
         const DIRC = 1 << 0;
@@ -83,6 +85,7 @@ bitflags::bitflags! {
 
 /// `HarmonicMeasurementStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct HarmonicMeasurementStruct {
     /// Field Order (tag 0).
@@ -93,6 +96,7 @@ pub struct HarmonicMeasurementStruct {
 
 /// `MeasurementAccuracyRangeStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct MeasurementAccuracyRangeStruct {
     /// Field RangeMin (tag 0).
@@ -115,6 +119,7 @@ pub struct MeasurementAccuracyRangeStruct {
 
 /// `MeasurementAccuracyStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct MeasurementAccuracyStruct {
     /// Field MeasurementType (tag 0).
@@ -131,6 +136,7 @@ pub struct MeasurementAccuracyStruct {
 
 /// `MeasurementRangeStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct MeasurementRangeStruct {
     /// Field MeasurementType (tag 0).
@@ -159,6 +165,7 @@ pub struct MeasurementRangeStruct {
 
 /// `MeasurementTypeEnum` (enum16).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MeasurementTypeEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -251,6 +258,7 @@ impl MeasurementTypeEnum {
 
 /// `PowerModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PowerModeEnum {
     /// Unknown = 0.
     Unknown,
@@ -871,6 +879,17 @@ pub fn decode_power_mode(tlv: &[u8]) -> Result<PowerModeEnum, ClusterError> {
     }
 }
 
+/// Encode the `PowerMode` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_power_mode(value: PowerModeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `NumberOfMeasurementTypes` attribute value.
 ///
 /// # Errors
@@ -889,6 +908,17 @@ pub fn decode_number_of_measurement_types(tlv: &[u8]) -> Result<u8, ClusterError
             context: "NumberOfMeasurementTypes",
         }),
     }
+}
+
+/// Encode the `NumberOfMeasurementTypes` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_measurement_types(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Accuracy` attribute value.
@@ -979,6 +1009,22 @@ pub fn decode_voltage(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError> {
     }
 }
 
+/// Encode the `Voltage` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_voltage(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `ActiveCurrent` attribute value.
 ///
 /// # Errors
@@ -1001,6 +1047,22 @@ pub fn decode_active_current(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError> 
             context: "ActiveCurrent",
         }),
     }
+}
+
+/// Encode the `ActiveCurrent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_active_current(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `ReactiveCurrent` attribute value.
@@ -1027,6 +1089,22 @@ pub fn decode_reactive_current(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError
     }
 }
 
+/// Encode the `ReactiveCurrent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_reactive_current(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `ApparentCurrent` attribute value.
 ///
 /// # Errors
@@ -1051,6 +1129,22 @@ pub fn decode_apparent_current(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError
     }
 }
 
+/// Encode the `ApparentCurrent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_apparent_current(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `ActivePower` attribute value.
 ///
 /// # Errors
@@ -1071,6 +1165,22 @@ pub fn decode_active_power(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError> {
             context: "ActivePower",
         }),
     }
+}
+
+/// Encode the `ActivePower` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_active_power(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `ReactivePower` attribute value.
@@ -1097,6 +1207,22 @@ pub fn decode_reactive_power(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError> 
     }
 }
 
+/// Encode the `ReactivePower` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_reactive_power(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `ApparentPower` attribute value.
 ///
 /// # Errors
@@ -1121,6 +1247,22 @@ pub fn decode_apparent_power(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError> 
     }
 }
 
+/// Encode the `ApparentPower` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_apparent_power(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `RmsVoltage` attribute value.
 ///
 /// # Errors
@@ -1141,6 +1283,22 @@ pub fn decode_rms_voltage(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError> {
             context: "RmsVoltage",
         }),
     }
+}
+
+/// Encode the `RmsVoltage` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_rms_voltage(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `RmsCurrent` attribute value.
@@ -1165,6 +1323,22 @@ pub fn decode_rms_current(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError> {
     }
 }
 
+/// Encode the `RmsCurrent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_rms_current(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `RmsPower` attribute value.
 ///
 /// # Errors
@@ -1187,6 +1361,22 @@ pub fn decode_rms_power(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError> {
     }
 }
 
+/// Encode the `RmsPower` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_rms_power(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Frequency` attribute value.
 ///
 /// # Errors
@@ -1207,6 +1397,22 @@ pub fn decode_frequency(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError> {
             context: "Frequency",
         }),
     }
+}
+
+/// Encode the `Frequency` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_frequency(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `HarmonicCurrents` attribute value.
@@ -1313,6 +1519,22 @@ pub fn decode_power_factor(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError> {
     }
 }
 
+/// Encode the `PowerFactor` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_power_factor(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `NeutralCurrent` attribute value.
 ///
 /// # Errors
@@ -1335,4 +1557,20 @@ pub fn decode_neutral_current(tlv: &[u8]) -> Result<Nullable<i64>, ClusterError>
             context: "NeutralCurrent",
         }),
     }
+}
+
+/// Encode the `NeutralCurrent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_neutral_current(value: Nullable<i64>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }

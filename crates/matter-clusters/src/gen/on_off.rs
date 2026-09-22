@@ -52,6 +52,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `OnOff` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// Lighting (LT).
         const LT = 1 << 0;
@@ -64,6 +66,7 @@ bitflags::bitflags! {
 
 /// `DelayedAllOffEffectVariantEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DelayedAllOffEffectVariantEnum {
     /// DelayedOffFastFade = 0.
     DelayedOffFastFade,
@@ -100,6 +103,7 @@ impl DelayedAllOffEffectVariantEnum {
 
 /// `DyingLightEffectVariantEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DyingLightEffectVariantEnum {
     /// DyingLightFadeOff = 0.
     DyingLightFadeOff,
@@ -128,6 +132,7 @@ impl DyingLightEffectVariantEnum {
 
 /// `EffectIdentifierEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EffectIdentifierEnum {
     /// DelayedAllOff = 0.
     DelayedAllOff,
@@ -161,6 +166,8 @@ impl EffectIdentifierEnum {
 bitflags::bitflags! {
     /// `OnOffControlBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct OnOffControlBitmap: u8 {
         /// AcceptOnlyWhenOn.
         const ACCEPT_ONLY_WHEN_ON = 1 << 0;
@@ -169,6 +176,7 @@ bitflags::bitflags! {
 
 /// `StartUpOnOffEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StartUpOnOffEnum {
     /// Off = 0.
     Off,
@@ -218,6 +226,17 @@ pub fn decode_on_off(tlv: &[u8]) -> Result<bool, ClusterError> {
     }
 }
 
+/// Encode the `OnOff` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_on_off(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `GlobalSceneControl` attribute value.
 ///
 /// # Errors
@@ -233,6 +252,17 @@ pub fn decode_global_scene_control(tlv: &[u8]) -> Result<bool, ClusterError> {
             context: "GlobalSceneControl",
         }),
     }
+}
+
+/// Encode the `GlobalSceneControl` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_global_scene_control(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `OnTime` attribute value.

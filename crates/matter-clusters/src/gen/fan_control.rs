@@ -56,6 +56,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `FanControl` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// MultiSpeed (SPD).
         const SPD = 1 << 0;
@@ -74,6 +76,7 @@ bitflags::bitflags! {
 
 /// `AirflowDirectionEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AirflowDirectionEnum {
     /// Forward = 0.
     Forward,
@@ -106,6 +109,7 @@ impl AirflowDirectionEnum {
 
 /// `FanModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FanModeEnum {
     /// Off = 0.
     Off,
@@ -158,6 +162,7 @@ impl FanModeEnum {
 
 /// `FanModeSequenceEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FanModeSequenceEnum {
     /// OffLowMedHigh = 0.
     OffLowMedHigh,
@@ -207,6 +212,8 @@ impl FanModeSequenceEnum {
 bitflags::bitflags! {
     /// `RockBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct RockBitmap: u8 {
         /// RockLeftRight.
         const ROCK_LEFT_RIGHT = 1 << 0;
@@ -219,6 +226,7 @@ bitflags::bitflags! {
 
 /// `StepDirectionEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StepDirectionEnum {
     /// Increase = 0.
     Increase,
@@ -252,6 +260,8 @@ impl StepDirectionEnum {
 bitflags::bitflags! {
     /// `WindBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct WindBitmap: u8 {
         /// SleepWind.
         const SLEEP_WIND = 1 << 0;
@@ -305,6 +315,17 @@ pub fn decode_fan_mode_sequence(tlv: &[u8]) -> Result<FanModeSequenceEnum, Clust
             context: "FanModeSequence",
         }),
     }
+}
+
+/// Encode the `FanModeSequence` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_fan_mode_sequence(value: FanModeSequenceEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `PercentSetting` attribute value.
@@ -364,6 +385,17 @@ pub fn decode_percent_current(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `PercentCurrent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_percent_current(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `SpeedMax` attribute value.
 ///
 /// # Errors
@@ -379,6 +411,17 @@ pub fn decode_speed_max(tlv: &[u8]) -> Result<u8, ClusterError> {
             context: "SpeedMax",
         }),
     }
+}
+
+/// Encode the `SpeedMax` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_speed_max(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `SpeedSetting` attribute value.
@@ -438,6 +481,17 @@ pub fn decode_speed_current(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `SpeedCurrent` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_speed_current(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `RockSupport` attribute value.
 ///
 /// # Errors
@@ -455,6 +509,17 @@ pub fn decode_rock_support(tlv: &[u8]) -> Result<RockBitmap, ClusterError> {
             context: "RockSupport",
         }),
     }
+}
+
+/// Encode the `RockSupport` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_rock_support(value: RockBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `RockSetting` attribute value.
@@ -504,6 +569,17 @@ pub fn decode_wind_support(tlv: &[u8]) -> Result<WindBitmap, ClusterError> {
             context: "WindSupport",
         }),
     }
+}
+
+/// Encode the `WindSupport` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_wind_support(value: WindBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `WindSetting` attribute value.

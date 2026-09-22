@@ -75,6 +75,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `PumpConfigurationAndControl` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// ConstantPressure (PRSCONST).
         const PRSCONST = 1 << 0;
@@ -95,6 +97,7 @@ bitflags::bitflags! {
 
 /// `ControlModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ControlModeEnum {
     /// ConstantSpeed = 0.
     ConstantSpeed,
@@ -143,6 +146,7 @@ impl ControlModeEnum {
 
 /// `OperationModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OperationModeEnum {
     /// Normal = 0.
     Normal,
@@ -184,6 +188,8 @@ impl OperationModeEnum {
 bitflags::bitflags! {
     /// `PumpStatusBitmap` (map16).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct PumpStatusBitmap: u16 {
         /// DeviceFault.
         const DEVICE_FAULT = 1 << 0;
@@ -228,6 +234,22 @@ pub fn decode_max_pressure(tlv: &[u8]) -> Result<Nullable<i16>, ClusterError> {
     }
 }
 
+/// Encode the `MaxPressure` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_pressure(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `MaxSpeed` attribute value.
 ///
 /// # Errors
@@ -250,6 +272,22 @@ pub fn decode_max_speed(tlv: &[u8]) -> Result<Nullable<u16>, ClusterError> {
     }
 }
 
+/// Encode the `MaxSpeed` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_speed(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `MaxFlow` attribute value.
 ///
 /// # Errors
@@ -268,6 +306,22 @@ pub fn decode_max_flow(tlv: &[u8]) -> Result<Nullable<u16>, ClusterError> {
         )),
         _ => Err(ClusterError::UnexpectedType { context: "MaxFlow" }),
     }
+}
+
+/// Encode the `MaxFlow` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_flow(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `MinConstPressure` attribute value.
@@ -294,6 +348,22 @@ pub fn decode_min_const_pressure(tlv: &[u8]) -> Result<Nullable<i16>, ClusterErr
     }
 }
 
+/// Encode the `MinConstPressure` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_const_pressure(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `MaxConstPressure` attribute value.
 ///
 /// # Errors
@@ -316,6 +386,22 @@ pub fn decode_max_const_pressure(tlv: &[u8]) -> Result<Nullable<i16>, ClusterErr
             context: "MaxConstPressure",
         }),
     }
+}
+
+/// Encode the `MaxConstPressure` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_const_pressure(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `MinCompPressure` attribute value.
@@ -342,6 +428,22 @@ pub fn decode_min_comp_pressure(tlv: &[u8]) -> Result<Nullable<i16>, ClusterErro
     }
 }
 
+/// Encode the `MinCompPressure` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_comp_pressure(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `MaxCompPressure` attribute value.
 ///
 /// # Errors
@@ -364,6 +466,22 @@ pub fn decode_max_comp_pressure(tlv: &[u8]) -> Result<Nullable<i16>, ClusterErro
             context: "MaxCompPressure",
         }),
     }
+}
+
+/// Encode the `MaxCompPressure` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_comp_pressure(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `MinConstSpeed` attribute value.
@@ -390,6 +508,22 @@ pub fn decode_min_const_speed(tlv: &[u8]) -> Result<Nullable<u16>, ClusterError>
     }
 }
 
+/// Encode the `MinConstSpeed` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_const_speed(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `MaxConstSpeed` attribute value.
 ///
 /// # Errors
@@ -412,6 +546,22 @@ pub fn decode_max_const_speed(tlv: &[u8]) -> Result<Nullable<u16>, ClusterError>
             context: "MaxConstSpeed",
         }),
     }
+}
+
+/// Encode the `MaxConstSpeed` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_const_speed(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `MinConstFlow` attribute value.
@@ -438,6 +588,22 @@ pub fn decode_min_const_flow(tlv: &[u8]) -> Result<Nullable<u16>, ClusterError> 
     }
 }
 
+/// Encode the `MinConstFlow` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_const_flow(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `MaxConstFlow` attribute value.
 ///
 /// # Errors
@@ -460,6 +626,22 @@ pub fn decode_max_const_flow(tlv: &[u8]) -> Result<Nullable<u16>, ClusterError> 
             context: "MaxConstFlow",
         }),
     }
+}
+
+/// Encode the `MaxConstFlow` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_const_flow(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `MinConstTemp` attribute value.
@@ -486,6 +668,22 @@ pub fn decode_min_const_temp(tlv: &[u8]) -> Result<Nullable<i16>, ClusterError> 
     }
 }
 
+/// Encode the `MinConstTemp` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_const_temp(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `MaxConstTemp` attribute value.
 ///
 /// # Errors
@@ -510,6 +708,22 @@ pub fn decode_max_const_temp(tlv: &[u8]) -> Result<Nullable<i16>, ClusterError> 
     }
 }
 
+/// Encode the `MaxConstTemp` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_const_temp(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `PumpStatus` attribute value.
 ///
 /// # Errors
@@ -527,6 +741,17 @@ pub fn decode_pump_status(tlv: &[u8]) -> Result<PumpStatusBitmap, ClusterError> 
             context: "PumpStatus",
         }),
     }
+}
+
+/// Encode the `PumpStatus` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_pump_status(value: PumpStatusBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `EffectiveOperationMode` attribute value.
@@ -548,6 +773,17 @@ pub fn decode_effective_operation_mode(tlv: &[u8]) -> Result<OperationModeEnum, 
     }
 }
 
+/// Encode the `EffectiveOperationMode` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_effective_operation_mode(value: OperationModeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `EffectiveControlMode` attribute value.
 ///
 /// # Errors
@@ -565,6 +801,17 @@ pub fn decode_effective_control_mode(tlv: &[u8]) -> Result<ControlModeEnum, Clus
             context: "EffectiveControlMode",
         }),
     }
+}
+
+/// Encode the `EffectiveControlMode` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_effective_control_mode(value: ControlModeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Capacity` attribute value.
@@ -589,6 +836,22 @@ pub fn decode_capacity(tlv: &[u8]) -> Result<Nullable<i16>, ClusterError> {
     }
 }
 
+/// Encode the `Capacity` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_capacity(value: Nullable<i16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_int(Tag::Anonymous, i64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Speed` attribute value.
 ///
 /// # Errors
@@ -607,6 +870,22 @@ pub fn decode_speed(tlv: &[u8]) -> Result<Nullable<u16>, ClusterError> {
         )),
         _ => Err(ClusterError::UnexpectedType { context: "Speed" }),
     }
+}
+
+/// Encode the `Speed` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_speed(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `LifetimeRunningHours` attribute value.
@@ -665,6 +944,22 @@ pub fn decode_power(tlv: &[u8]) -> Result<Nullable<u32>, ClusterError> {
         )),
         _ => Err(ClusterError::UnexpectedType { context: "Power" }),
     }
+}
+
+/// Encode the `Power` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_power(value: Nullable<u32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `LifetimeEnergyConsumed` attribute value.

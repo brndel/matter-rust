@@ -31,6 +31,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `AirQuality` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// Fair (FAIR).
         const FAIR = 1 << 0;
@@ -45,6 +47,7 @@ bitflags::bitflags! {
 
 /// `AirQualityEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AirQualityEnum {
     /// Unknown = 0.
     Unknown,
@@ -112,4 +115,15 @@ pub fn decode_air_quality(tlv: &[u8]) -> Result<AirQualityEnum, ClusterError> {
             context: "AirQuality",
         }),
     }
+}
+
+/// Encode the `AirQuality` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_air_quality(value: AirQualityEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }

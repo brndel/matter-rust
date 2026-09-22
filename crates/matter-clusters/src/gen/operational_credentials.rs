@@ -71,6 +71,7 @@ pub mod attribute_id {
 
 /// `CertificateChainTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CertificateChainTypeEnum {
     /// DacCertificate = 1.
     DacCertificate,
@@ -103,6 +104,7 @@ impl CertificateChainTypeEnum {
 
 /// `FabricDescriptorStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct FabricDescriptorStruct {
     /// Field RootPublicKey (tag 1).
@@ -123,6 +125,7 @@ pub struct FabricDescriptorStruct {
 
 /// `NOCStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct NOCStruct {
     /// Field Noc (tag 1).
@@ -137,6 +140,7 @@ pub struct NOCStruct {
 
 /// `NodeOperationalCertStatusEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NodeOperationalCertStatusEnum {
     /// Ok = 0.
     Ok,
@@ -511,6 +515,17 @@ pub fn decode_supported_fabrics(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `SupportedFabrics` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_supported_fabrics(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `CommissionedFabrics` attribute value.
 ///
 /// # Errors
@@ -526,6 +541,17 @@ pub fn decode_commissioned_fabrics(tlv: &[u8]) -> Result<u8, ClusterError> {
             context: "CommissionedFabrics",
         }),
     }
+}
+
+/// Encode the `CommissionedFabrics` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_commissioned_fabrics(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `TrustedRootCertificates` attribute value.
@@ -577,6 +603,17 @@ pub fn decode_current_fabric_index(tlv: &[u8]) -> Result<u8, ClusterError> {
             context: "CurrentFabricIndex",
         }),
     }
+}
+
+/// Encode the `CurrentFabricIndex` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_fabric_index(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Encode the `AttestationRequest` command request payload.

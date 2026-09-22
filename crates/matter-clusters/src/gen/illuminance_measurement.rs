@@ -38,6 +38,7 @@ pub mod attribute_id {
 
 /// `LightSensorTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LightSensorTypeEnum {
     /// Photodiode = 0.
     Photodiode,
@@ -92,6 +93,22 @@ pub fn decode_measured_value(tlv: &[u8]) -> Result<Nullable<u16>, ClusterError> 
     }
 }
 
+/// Encode the `MeasuredValue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_measured_value(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `MinMeasuredValue` attribute value.
 ///
 /// # Errors
@@ -114,6 +131,22 @@ pub fn decode_min_measured_value(tlv: &[u8]) -> Result<Nullable<u16>, ClusterErr
             context: "MinMeasuredValue",
         }),
     }
+}
+
+/// Encode the `MinMeasuredValue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_measured_value(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `MaxMeasuredValue` attribute value.
@@ -140,6 +173,22 @@ pub fn decode_max_measured_value(tlv: &[u8]) -> Result<Nullable<u16>, ClusterErr
     }
 }
 
+/// Encode the `MaxMeasuredValue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_measured_value(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `Tolerance` attribute value.
 ///
 /// # Errors
@@ -155,6 +204,17 @@ pub fn decode_tolerance(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "Tolerance",
         }),
     }
+}
+
+/// Encode the `Tolerance` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_tolerance(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `LightSensorType` attribute value.
@@ -179,4 +239,20 @@ pub fn decode_light_sensor_type(tlv: &[u8]) -> Result<Nullable<u8>, ClusterError
             context: "LightSensorType",
         }),
     }
+}
+
+/// Encode the `LightSensorType` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_light_sensor_type(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }

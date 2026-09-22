@@ -44,3 +44,14 @@ pub fn decode_state_value(tlv: &[u8]) -> Result<bool, ClusterError> {
         }),
     }
 }
+
+/// Encode the `StateValue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_state_value(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
+}

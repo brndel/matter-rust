@@ -53,6 +53,8 @@ pub mod event_id {
 bitflags::bitflags! {
     /// `Switch` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// LatchingSwitch (LS).
         const LS = 1 << 0;
@@ -86,6 +88,17 @@ pub fn decode_number_of_positions(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `NumberOfPositions` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_positions(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `CurrentPosition` attribute value.
 ///
 /// # Errors
@@ -103,6 +116,17 @@ pub fn decode_current_position(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `CurrentPosition` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_position(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `MultiPressMax` attribute value.
 ///
 /// # Errors
@@ -118,6 +142,17 @@ pub fn decode_multi_press_max(tlv: &[u8]) -> Result<u8, ClusterError> {
             context: "MultiPressMax",
         }),
     }
+}
+
+/// Encode the `MultiPressMax` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_multi_press_max(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decoded `SwitchLatchedEvent` payload.

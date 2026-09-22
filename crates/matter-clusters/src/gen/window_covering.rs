@@ -68,6 +68,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `WindowCovering` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// Lift (LF).
         const LF = 1 << 0;
@@ -83,6 +85,8 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// `ConfigStatusBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct ConfigStatusBitmap: u8 {
         /// Operational.
         const OPERATIONAL = 1 << 0;
@@ -103,6 +107,7 @@ bitflags::bitflags! {
 
 /// `EndProductTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EndProductTypeEnum {
     /// RollerShade = 0.
     RollerShade,
@@ -228,6 +233,8 @@ impl EndProductTypeEnum {
 bitflags::bitflags! {
     /// `ModeBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct ModeBitmap: u8 {
         /// MotorDirectionReversed.
         const MOTOR_DIRECTION_REVERSED = 1 << 0;
@@ -242,6 +249,7 @@ bitflags::bitflags! {
 
 /// `MovementStatus` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MovementStatus {
     /// Stopped = 0.
     Stopped,
@@ -279,6 +287,8 @@ impl MovementStatus {
 bitflags::bitflags! {
     /// `OperationalStatusBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct OperationalStatusBitmap: u8 {
     }
 }
@@ -286,6 +296,8 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// `SafetyStatusBitmap` (map16).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct SafetyStatusBitmap: u16 {
         /// RemoteLockout.
         const REMOTE_LOCKOUT = 1 << 0;
@@ -316,6 +328,7 @@ bitflags::bitflags! {
 
 /// `TypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TypeEnum {
     /// Rollershade = 0.
     Rollershade,
@@ -399,6 +412,17 @@ pub fn decode_type(tlv: &[u8]) -> Result<TypeEnum, ClusterError> {
     }
 }
 
+/// Encode the `Type` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_type(value: TypeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `NumberOfActuationsLift` attribute value.
 ///
 /// # Errors
@@ -417,6 +441,17 @@ pub fn decode_number_of_actuations_lift(tlv: &[u8]) -> Result<u16, ClusterError>
             context: "NumberOfActuationsLift",
         }),
     }
+}
+
+/// Encode the `NumberOfActuationsLift` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_actuations_lift(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `NumberOfActuationsTilt` attribute value.
@@ -439,6 +474,17 @@ pub fn decode_number_of_actuations_tilt(tlv: &[u8]) -> Result<u16, ClusterError>
     }
 }
 
+/// Encode the `NumberOfActuationsTilt` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_number_of_actuations_tilt(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ConfigStatus` attribute value.
 ///
 /// # Errors
@@ -456,6 +502,17 @@ pub fn decode_config_status(tlv: &[u8]) -> Result<ConfigStatusBitmap, ClusterErr
             context: "ConfigStatus",
         }),
     }
+}
+
+/// Encode the `ConfigStatus` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_config_status(value: ConfigStatusBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `CurrentPositionLiftPercentage` attribute value.
@@ -480,6 +537,22 @@ pub fn decode_current_position_lift_percentage(tlv: &[u8]) -> Result<Nullable<u8
     }
 }
 
+/// Encode the `CurrentPositionLiftPercentage` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_position_lift_percentage(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `CurrentPositionTiltPercentage` attribute value.
 ///
 /// # Errors
@@ -502,6 +575,22 @@ pub fn decode_current_position_tilt_percentage(tlv: &[u8]) -> Result<Nullable<u8
     }
 }
 
+/// Encode the `CurrentPositionTiltPercentage` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_position_tilt_percentage(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `OperationalStatus` attribute value.
 ///
 /// # Errors
@@ -519,6 +608,17 @@ pub fn decode_operational_status(tlv: &[u8]) -> Result<OperationalStatusBitmap, 
             context: "OperationalStatus",
         }),
     }
+}
+
+/// Encode the `OperationalStatus` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_operational_status(value: OperationalStatusBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `TargetPositionLiftPercent100ths` attribute value.
@@ -545,6 +645,22 @@ pub fn decode_target_position_lift_percent100ths(
     }
 }
 
+/// Encode the `TargetPositionLiftPercent100ths` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_target_position_lift_percent100ths(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `TargetPositionTiltPercent100ths` attribute value.
 ///
 /// # Errors
@@ -569,6 +685,22 @@ pub fn decode_target_position_tilt_percent100ths(
     }
 }
 
+/// Encode the `TargetPositionTiltPercent100ths` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_target_position_tilt_percent100ths(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `EndProductType` attribute value.
 ///
 /// # Errors
@@ -586,6 +718,17 @@ pub fn decode_end_product_type(tlv: &[u8]) -> Result<EndProductTypeEnum, Cluster
             context: "EndProductType",
         }),
     }
+}
+
+/// Encode the `EndProductType` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_end_product_type(value: EndProductTypeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `CurrentPositionLiftPercent100ths` attribute value.
@@ -612,6 +755,22 @@ pub fn decode_current_position_lift_percent100ths(
     }
 }
 
+/// Encode the `CurrentPositionLiftPercent100ths` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_position_lift_percent100ths(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `CurrentPositionTiltPercent100ths` attribute value.
 ///
 /// # Errors
@@ -634,6 +793,22 @@ pub fn decode_current_position_tilt_percent100ths(
             context: "CurrentPositionTiltPercent100ths",
         }),
     }
+}
+
+/// Encode the `CurrentPositionTiltPercent100ths` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_position_tilt_percent100ths(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `Mode` attribute value.
@@ -681,6 +856,17 @@ pub fn decode_safety_status(tlv: &[u8]) -> Result<SafetyStatusBitmap, ClusterErr
             context: "SafetyStatus",
         }),
     }
+}
+
+/// Encode the `SafetyStatus` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_safety_status(value: SafetyStatusBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Encode the `UpOrOpen` command request payload.

@@ -19,6 +19,12 @@ workspace = true
 matter-codec = { path = "../matter-codec", version = "0.3.0" }
 bitflags = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[features]
+serde = ["dep:serde", "bitflags/serde"]
+default = ["serde"]
+
 
 [dev-dependencies]
 serde_json = { workspace = true }

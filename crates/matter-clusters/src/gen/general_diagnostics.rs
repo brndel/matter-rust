@@ -58,6 +58,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `GeneralDiagnostics` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// DataModelTest (DMTEST).
         const DMTEST = 1 << 0;
@@ -66,6 +68,7 @@ bitflags::bitflags! {
 
 /// `BootReasonEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BootReasonEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -118,6 +121,7 @@ impl BootReasonEnum {
 
 /// `HardwareFaultEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum HardwareFaultEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -186,6 +190,7 @@ impl HardwareFaultEnum {
 
 /// `InterfaceTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum InterfaceTypeEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -230,6 +235,7 @@ impl InterfaceTypeEnum {
 
 /// `NetworkFaultEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NetworkFaultEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -270,6 +276,7 @@ impl NetworkFaultEnum {
 
 /// `NetworkInterface` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct NetworkInterface {
     /// Field Name (tag 0).
@@ -292,6 +299,7 @@ pub struct NetworkInterface {
 
 /// `RadioFaultEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RadioFaultEnum {
     /// Unspecified = 0.
     Unspecified,
@@ -539,6 +547,17 @@ pub fn decode_reboot_count(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `RebootCount` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_reboot_count(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `UpTime` attribute value.
 ///
 /// # Errors
@@ -552,6 +571,17 @@ pub fn decode_up_time(tlv: &[u8]) -> Result<u64, ClusterError> {
         }) => Ok(u64::try_from(v).map_err(|_| ClusterError::InvalidLength("UpTime"))?),
         _ => Err(ClusterError::UnexpectedType { context: "UpTime" }),
     }
+}
+
+/// Encode the `UpTime` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_up_time(value: u64) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `TotalOperationalHours` attribute value.
@@ -574,6 +604,17 @@ pub fn decode_total_operational_hours(tlv: &[u8]) -> Result<u32, ClusterError> {
     }
 }
 
+/// Encode the `TotalOperationalHours` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_total_operational_hours(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `BootReason` attribute value.
 ///
 /// # Errors
@@ -591,6 +632,17 @@ pub fn decode_boot_reason(tlv: &[u8]) -> Result<BootReasonEnum, ClusterError> {
             context: "BootReason",
         }),
     }
+}
+
+/// Encode the `BootReason` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_boot_reason(value: BootReasonEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ActiveHardwareFaults` attribute value.
@@ -716,6 +768,17 @@ pub fn decode_test_event_triggers_enabled(tlv: &[u8]) -> Result<bool, ClusterErr
             context: "TestEventTriggersEnabled",
         }),
     }
+}
+
+/// Encode the `TestEventTriggersEnabled` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_test_event_triggers_enabled(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Encode the `TestEventTrigger` command request payload.

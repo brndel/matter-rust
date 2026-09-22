@@ -39,6 +39,7 @@ pub mod attribute_id {
 
 /// `AnnouncementReasonEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AnnouncementReasonEnum {
     /// SimpleAnnouncement = 0.
     SimpleAnnouncement,
@@ -75,6 +76,7 @@ impl AnnouncementReasonEnum {
 
 /// `ChangeReasonEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ChangeReasonEnum {
     /// Unknown = 0.
     Unknown,
@@ -119,6 +121,7 @@ impl ChangeReasonEnum {
 
 /// `ProviderLocation` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct ProviderLocation {
     /// Field ProviderNodeId (tag 1).
@@ -131,6 +134,7 @@ pub struct ProviderLocation {
 
 /// `UpdateStateEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum UpdateStateEnum {
     /// Unknown = 0.
     Unknown,
@@ -335,6 +339,17 @@ pub fn decode_update_possible(tlv: &[u8]) -> Result<bool, ClusterError> {
     }
 }
 
+/// Encode the `UpdatePossible` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_update_possible(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `UpdateState` attribute value.
 ///
 /// # Errors
@@ -352,6 +367,17 @@ pub fn decode_update_state(tlv: &[u8]) -> Result<UpdateStateEnum, ClusterError> 
             context: "UpdateState",
         }),
     }
+}
+
+/// Encode the `UpdateState` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_update_state(value: UpdateStateEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `UpdateStateProgress` attribute value.
@@ -374,6 +400,22 @@ pub fn decode_update_state_progress(tlv: &[u8]) -> Result<Nullable<u8>, ClusterE
             context: "UpdateStateProgress",
         }),
     }
+}
+
+/// Encode the `UpdateStateProgress` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_update_state_progress(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Encode the `AnnounceOtaProvider` command request payload.

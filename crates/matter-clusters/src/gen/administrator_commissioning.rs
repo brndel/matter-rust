@@ -42,6 +42,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `AdministratorCommissioning` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// Basic (BC).
         const BC = 1 << 0;
@@ -50,6 +52,7 @@ bitflags::bitflags! {
 
 /// `CommissioningWindowStatusEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CommissioningWindowStatusEnum {
     /// WindowNotOpen = 0.
     WindowNotOpen,
@@ -86,6 +89,7 @@ impl CommissioningWindowStatusEnum {
 
 /// `StatusCodeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StatusCodeEnum {
     /// Busy = 2.
     Busy,
@@ -139,6 +143,17 @@ pub fn decode_window_status(tlv: &[u8]) -> Result<CommissioningWindowStatusEnum,
     }
 }
 
+/// Encode the `WindowStatus` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_window_status(value: CommissioningWindowStatusEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `AdminFabricIndex` attribute value.
 ///
 /// # Errors
@@ -163,6 +178,22 @@ pub fn decode_admin_fabric_index(tlv: &[u8]) -> Result<Nullable<u8>, ClusterErro
     }
 }
 
+/// Encode the `AdminFabricIndex` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_admin_fabric_index(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `AdminVendorId` attribute value.
 ///
 /// # Errors
@@ -185,6 +216,22 @@ pub fn decode_admin_vendor_id(tlv: &[u8]) -> Result<Nullable<u16>, ClusterError>
             context: "AdminVendorId",
         }),
     }
+}
+
+/// Encode the `AdminVendorId` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_admin_vendor_id(value: Nullable<u16>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Encode the `OpenCommissioningWindow` command request payload.

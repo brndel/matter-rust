@@ -76,6 +76,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `LevelControl` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// OnOff (OO).
         const OO = 1 << 0;
@@ -88,6 +90,7 @@ bitflags::bitflags! {
 
 /// `MoveModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MoveModeEnum {
     /// Up = 0.
     Up,
@@ -121,6 +124,8 @@ impl MoveModeEnum {
 bitflags::bitflags! {
     /// `OptionsBitmap` (map8).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct OptionsBitmap: u8 {
         /// ExecuteIfOff.
         const EXECUTE_IF_OFF = 1 << 0;
@@ -131,6 +136,7 @@ bitflags::bitflags! {
 
 /// `StepModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StepModeEnum {
     /// Up = 0.
     Up,
@@ -185,6 +191,22 @@ pub fn decode_current_level(tlv: &[u8]) -> Result<Nullable<u8>, ClusterError> {
     }
 }
 
+/// Encode the `CurrentLevel` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_level(value: Nullable<u8>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_uint(Tag::Anonymous, u64::from(value))
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `RemainingTime` attribute value.
 ///
 /// # Errors
@@ -200,6 +222,17 @@ pub fn decode_remaining_time(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "RemainingTime",
         }),
     }
+}
+
+/// Encode the `RemainingTime` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_remaining_time(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `MinLevel` attribute value.
@@ -219,6 +252,17 @@ pub fn decode_min_level(tlv: &[u8]) -> Result<u8, ClusterError> {
     }
 }
 
+/// Encode the `MinLevel` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_level(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `MaxLevel` attribute value.
 ///
 /// # Errors
@@ -234,6 +278,17 @@ pub fn decode_max_level(tlv: &[u8]) -> Result<u8, ClusterError> {
             context: "MaxLevel",
         }),
     }
+}
+
+/// Encode the `MaxLevel` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_level(value: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `CurrentFrequency` attribute value.
@@ -253,6 +308,17 @@ pub fn decode_current_frequency(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `CurrentFrequency` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_current_frequency(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `MinFrequency` attribute value.
 ///
 /// # Errors
@@ -270,6 +336,17 @@ pub fn decode_min_frequency(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `MinFrequency` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_frequency(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `MaxFrequency` attribute value.
 ///
 /// # Errors
@@ -285,6 +362,17 @@ pub fn decode_max_frequency(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "MaxFrequency",
         }),
     }
+}
+
+/// Encode the `MaxFrequency` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_frequency(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `Options` attribute value.

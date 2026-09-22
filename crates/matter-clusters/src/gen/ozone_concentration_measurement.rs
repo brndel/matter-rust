@@ -51,6 +51,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `OzoneConcentrationMeasurement` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// NumericMeasurement (MEA).
         const MEA = 1 << 0;
@@ -69,6 +71,7 @@ bitflags::bitflags! {
 
 /// `LevelValueEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LevelValueEnum {
     /// Unknown = 0.
     Unknown,
@@ -113,6 +116,7 @@ impl LevelValueEnum {
 
 /// `MeasurementMediumEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MeasurementMediumEnum {
     /// Air = 0.
     Air,
@@ -149,6 +153,7 @@ impl MeasurementMediumEnum {
 
 /// `MeasurementUnitEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MeasurementUnitEnum {
     /// Ppm = 0.
     Ppm,
@@ -223,6 +228,22 @@ pub fn decode_measured_value(tlv: &[u8]) -> Result<Nullable<f32>, ClusterError> 
     }
 }
 
+/// Encode the `MeasuredValue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_measured_value(value: Nullable<f32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_float(Tag::Anonymous, value)
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `MinMeasuredValue` attribute value.
 ///
 /// # Errors
@@ -241,6 +262,22 @@ pub fn decode_min_measured_value(tlv: &[u8]) -> Result<Nullable<f32>, ClusterErr
             context: "MinMeasuredValue",
         }),
     }
+}
+
+/// Encode the `MinMeasuredValue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_min_measured_value(value: Nullable<f32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_float(Tag::Anonymous, value)
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `MaxMeasuredValue` attribute value.
@@ -263,6 +300,22 @@ pub fn decode_max_measured_value(tlv: &[u8]) -> Result<Nullable<f32>, ClusterErr
     }
 }
 
+/// Encode the `MaxMeasuredValue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_measured_value(value: Nullable<f32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_float(Tag::Anonymous, value)
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `PeakMeasuredValue` attribute value.
 ///
 /// # Errors
@@ -281,6 +334,22 @@ pub fn decode_peak_measured_value(tlv: &[u8]) -> Result<Nullable<f32>, ClusterEr
             context: "PeakMeasuredValue",
         }),
     }
+}
+
+/// Encode the `PeakMeasuredValue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_peak_measured_value(value: Nullable<f32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_float(Tag::Anonymous, value)
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
 }
 
 /// Decode the `PeakMeasuredValueWindow` attribute value.
@@ -303,6 +372,17 @@ pub fn decode_peak_measured_value_window(tlv: &[u8]) -> Result<u32, ClusterError
     }
 }
 
+/// Encode the `PeakMeasuredValueWindow` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_peak_measured_value_window(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `AverageMeasuredValue` attribute value.
 ///
 /// # Errors
@@ -323,6 +403,22 @@ pub fn decode_average_measured_value(tlv: &[u8]) -> Result<Nullable<f32>, Cluste
     }
 }
 
+/// Encode the `AverageMeasuredValue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_average_measured_value(value: Nullable<f32>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    match value {
+        Nullable::Null => w.put_null(Tag::Anonymous).expect("infallible: vec writer"),
+        Nullable::Value(value) => {
+            w.put_float(Tag::Anonymous, value)
+                .expect("infallible: vec writer");
+        }
+    }
+    buf
+}
+
 /// Decode the `AverageMeasuredValueWindow` attribute value.
 ///
 /// # Errors
@@ -341,6 +437,17 @@ pub fn decode_average_measured_value_window(tlv: &[u8]) -> Result<u32, ClusterEr
     }
 }
 
+/// Encode the `AverageMeasuredValueWindow` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_average_measured_value_window(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `Uncertainty` attribute value.
 ///
 /// # Errors
@@ -356,6 +463,17 @@ pub fn decode_uncertainty(tlv: &[u8]) -> Result<f32, ClusterError> {
             context: "Uncertainty",
         }),
     }
+}
+
+/// Encode the `Uncertainty` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_uncertainty(value: f32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_float(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `MeasurementUnit` attribute value.
@@ -377,6 +495,17 @@ pub fn decode_measurement_unit(tlv: &[u8]) -> Result<MeasurementUnitEnum, Cluste
     }
 }
 
+/// Encode the `MeasurementUnit` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_measurement_unit(value: MeasurementUnitEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `MeasurementMedium` attribute value.
 ///
 /// # Errors
@@ -396,6 +525,17 @@ pub fn decode_measurement_medium(tlv: &[u8]) -> Result<MeasurementMediumEnum, Cl
     }
 }
 
+/// Encode the `MeasurementMedium` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_measurement_medium(value: MeasurementMediumEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `LevelValue` attribute value.
 ///
 /// # Errors
@@ -413,4 +553,15 @@ pub fn decode_level_value(tlv: &[u8]) -> Result<LevelValueEnum, ClusterError> {
             context: "LevelValue",
         }),
     }
+}
+
+/// Encode the `LevelValue` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_level_value(value: LevelValueEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }

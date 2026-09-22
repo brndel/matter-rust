@@ -50,6 +50,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `GroupKeyManagement` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// CacheAndSync (CS).
         const CS = 1 << 0;
@@ -58,6 +60,7 @@ bitflags::bitflags! {
 
 /// `GroupInfoMapStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct GroupInfoMapStruct {
     /// Field GroupId (tag 1).
@@ -72,6 +75,7 @@ pub struct GroupInfoMapStruct {
 
 /// `GroupKeyMapStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct GroupKeyMapStruct {
     /// Field GroupId (tag 1).
@@ -84,6 +88,7 @@ pub struct GroupKeyMapStruct {
 
 /// `GroupKeyMulticastPolicyEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GroupKeyMulticastPolicyEnum {
     /// PerGroupId = 0.
     PerGroupId,
@@ -116,6 +121,7 @@ impl GroupKeyMulticastPolicyEnum {
 
 /// `GroupKeySecurityPolicyEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GroupKeySecurityPolicyEnum {
     /// TrustFirst = 0.
     TrustFirst,
@@ -148,6 +154,7 @@ impl GroupKeySecurityPolicyEnum {
 
 /// `GroupKeySetStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GroupKeySetStruct {
     /// Field GroupKeySetId (tag 0).
     pub group_key_set_id: u16,
@@ -682,6 +689,17 @@ pub fn decode_max_groups_per_fabric(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `MaxGroupsPerFabric` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_groups_per_fabric(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `MaxGroupKeysPerFabric` attribute value.
 ///
 /// # Errors
@@ -700,6 +718,17 @@ pub fn decode_max_group_keys_per_fabric(tlv: &[u8]) -> Result<u16, ClusterError>
             context: "MaxGroupKeysPerFabric",
         }),
     }
+}
+
+/// Encode the `MaxGroupKeysPerFabric` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_group_keys_per_fabric(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Encode the `KeySetWrite` command request payload.

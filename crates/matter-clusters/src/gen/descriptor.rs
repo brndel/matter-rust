@@ -41,6 +41,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `Descriptor` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// TagList (TAGLIST).
         const TAGLIST = 1 << 0;
@@ -49,6 +51,7 @@ bitflags::bitflags! {
 
 /// `DeviceTypeStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct DeviceTypeStruct {
     /// Field DeviceType (tag 0).
@@ -325,4 +328,15 @@ pub fn decode_endpoint_unique_id(tlv: &[u8]) -> Result<String, ClusterError> {
             context: "EndpointUniqueId",
         }),
     }
+}
+
+/// Encode the `EndpointUniqueId` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_endpoint_unique_id(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }

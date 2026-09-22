@@ -60,6 +60,8 @@ pub mod attribute_id {
 bitflags::bitflags! {
     /// `IcdManagement` feature bits (FeatureMap).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct Feature: u32 {
         /// CheckInProtocolSupport (CIP).
         const CIP = 1 << 0;
@@ -74,6 +76,7 @@ bitflags::bitflags! {
 
 /// `ClientTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ClientTypeEnum {
     /// Permanent = 0.
     Permanent,
@@ -106,6 +109,7 @@ impl ClientTypeEnum {
 
 /// `MonitoringRegistrationStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct MonitoringRegistrationStruct {
     /// Field CheckInNodeId (tag 1).
@@ -120,6 +124,7 @@ pub struct MonitoringRegistrationStruct {
 
 /// `OperatingModeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OperatingModeEnum {
     /// Sit = 0.
     Sit,
@@ -153,6 +158,8 @@ impl OperatingModeEnum {
 bitflags::bitflags! {
     /// `UserActiveModeTriggerBitmap` (map32).
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     pub struct UserActiveModeTriggerBitmap: u32 {
         /// PowerCycle.
         const POWER_CYCLE = 1 << 0;
@@ -315,6 +322,17 @@ pub fn decode_idle_mode_duration(tlv: &[u8]) -> Result<u32, ClusterError> {
     }
 }
 
+/// Encode the `IdleModeDuration` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_idle_mode_duration(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ActiveModeDuration` attribute value.
 ///
 /// # Errors
@@ -332,6 +350,17 @@ pub fn decode_active_mode_duration(tlv: &[u8]) -> Result<u32, ClusterError> {
     }
 }
 
+/// Encode the `ActiveModeDuration` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_active_mode_duration(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ActiveModeThreshold` attribute value.
 ///
 /// # Errors
@@ -347,6 +376,17 @@ pub fn decode_active_mode_threshold(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "ActiveModeThreshold",
         }),
     }
+}
+
+/// Encode the `ActiveModeThreshold` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_active_mode_threshold(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `RegisteredClients` attribute value.
@@ -404,6 +444,17 @@ pub fn decode_icd_counter(tlv: &[u8]) -> Result<u32, ClusterError> {
     }
 }
 
+/// Encode the `IcdCounter` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_icd_counter(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ClientsSupportedPerFabric` attribute value.
 ///
 /// # Errors
@@ -420,6 +471,17 @@ pub fn decode_clients_supported_per_fabric(tlv: &[u8]) -> Result<u16, ClusterErr
             context: "ClientsSupportedPerFabric",
         }),
     }
+}
+
+/// Encode the `ClientsSupportedPerFabric` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_clients_supported_per_fabric(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `UserActiveModeTriggerHint` attribute value.
@@ -444,6 +506,17 @@ pub fn decode_user_active_mode_trigger_hint(
     }
 }
 
+/// Encode the `UserActiveModeTriggerHint` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_user_active_mode_trigger_hint(value: UserActiveModeTriggerBitmap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.bits()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `UserActiveModeTriggerInstruction` attribute value.
 ///
 /// # Errors
@@ -459,6 +532,17 @@ pub fn decode_user_active_mode_trigger_instruction(tlv: &[u8]) -> Result<String,
             context: "UserActiveModeTriggerInstruction",
         }),
     }
+}
+
+/// Encode the `UserActiveModeTriggerInstruction` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_user_active_mode_trigger_instruction(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `OperatingMode` attribute value.
@@ -480,6 +564,17 @@ pub fn decode_operating_mode(tlv: &[u8]) -> Result<OperatingModeEnum, ClusterErr
     }
 }
 
+/// Encode the `OperatingMode` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_operating_mode(value: OperatingModeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `MaximumCheckInBackoff` attribute value.
 ///
 /// # Errors
@@ -498,6 +593,17 @@ pub fn decode_maximum_check_in_backoff(tlv: &[u8]) -> Result<u32, ClusterError> 
             context: "MaximumCheckInBackoff",
         }),
     }
+}
+
+/// Encode the `MaximumCheckInBackoff` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_maximum_check_in_backoff(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Encode the `RegisterClient` command request payload.

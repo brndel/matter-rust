@@ -76,6 +76,7 @@ pub mod attribute_id {
 
 /// `CapabilityMinimaStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct CapabilityMinimaStruct {
     /// Field CaseSessionsPerFabric (tag 0).
@@ -86,6 +87,7 @@ pub struct CapabilityMinimaStruct {
 
 /// `ColorEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ColorEnum {
     /// Black = 0.
     Black,
@@ -194,6 +196,7 @@ impl ColorEnum {
 
 /// `ProductAppearanceStruct` struct.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct ProductAppearanceStruct {
     /// Field Finish (tag 0).
@@ -204,6 +207,7 @@ pub struct ProductAppearanceStruct {
 
 /// `ProductFinishEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ProductFinishEnum {
     /// Other = 0.
     Other,
@@ -438,6 +442,17 @@ pub fn decode_data_model_revision(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `DataModelRevision` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_data_model_revision(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `VendorName` attribute value.
 ///
 /// # Errors
@@ -453,6 +468,17 @@ pub fn decode_vendor_name(tlv: &[u8]) -> Result<String, ClusterError> {
             context: "VendorName",
         }),
     }
+}
+
+/// Encode the `VendorName` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_vendor_name(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `VendorId` attribute value.
@@ -472,6 +498,17 @@ pub fn decode_vendor_id(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `VendorId` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_vendor_id(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ProductName` attribute value.
 ///
 /// # Errors
@@ -489,6 +526,17 @@ pub fn decode_product_name(tlv: &[u8]) -> Result<String, ClusterError> {
     }
 }
 
+/// Encode the `ProductName` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_product_name(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ProductId` attribute value.
 ///
 /// # Errors
@@ -504,6 +552,17 @@ pub fn decode_product_id(tlv: &[u8]) -> Result<u16, ClusterError> {
             context: "ProductId",
         }),
     }
+}
+
+/// Encode the `ProductId` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_product_id(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `NodeLabel` attribute value.
@@ -579,6 +638,17 @@ pub fn decode_hardware_version(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `HardwareVersion` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_hardware_version(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `HardwareVersionString` attribute value.
 ///
 /// # Errors
@@ -594,6 +664,17 @@ pub fn decode_hardware_version_string(tlv: &[u8]) -> Result<String, ClusterError
             context: "HardwareVersionString",
         }),
     }
+}
+
+/// Encode the `HardwareVersionString` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_hardware_version_string(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `SoftwareVersion` attribute value.
@@ -613,6 +694,17 @@ pub fn decode_software_version(tlv: &[u8]) -> Result<u32, ClusterError> {
     }
 }
 
+/// Encode the `SoftwareVersion` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_software_version(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `SoftwareVersionString` attribute value.
 ///
 /// # Errors
@@ -628,6 +720,17 @@ pub fn decode_software_version_string(tlv: &[u8]) -> Result<String, ClusterError
             context: "SoftwareVersionString",
         }),
     }
+}
+
+/// Encode the `SoftwareVersionString` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_software_version_string(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ManufacturingDate` attribute value.
@@ -647,6 +750,17 @@ pub fn decode_manufacturing_date(tlv: &[u8]) -> Result<String, ClusterError> {
     }
 }
 
+/// Encode the `ManufacturingDate` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_manufacturing_date(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `PartNumber` attribute value.
 ///
 /// # Errors
@@ -662,6 +776,17 @@ pub fn decode_part_number(tlv: &[u8]) -> Result<String, ClusterError> {
             context: "PartNumber",
         }),
     }
+}
+
+/// Encode the `PartNumber` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_part_number(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `ProductUrl` attribute value.
@@ -681,6 +806,17 @@ pub fn decode_product_url(tlv: &[u8]) -> Result<String, ClusterError> {
     }
 }
 
+/// Encode the `ProductUrl` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_product_url(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ProductLabel` attribute value.
 ///
 /// # Errors
@@ -698,6 +834,17 @@ pub fn decode_product_label(tlv: &[u8]) -> Result<String, ClusterError> {
     }
 }
 
+/// Encode the `ProductLabel` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_product_label(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `SerialNumber` attribute value.
 ///
 /// # Errors
@@ -713,6 +860,17 @@ pub fn decode_serial_number(tlv: &[u8]) -> Result<String, ClusterError> {
             context: "SerialNumber",
         }),
     }
+}
+
+/// Encode the `SerialNumber` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_serial_number(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `LocalConfigDisabled` attribute value.
@@ -760,6 +918,17 @@ pub fn decode_reachable(tlv: &[u8]) -> Result<bool, ClusterError> {
     }
 }
 
+/// Encode the `Reachable` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_reachable(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_bool(Tag::Anonymous, value)
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `UniqueId` attribute value.
 ///
 /// # Errors
@@ -775,6 +944,17 @@ pub fn decode_unique_id(tlv: &[u8]) -> Result<String, ClusterError> {
             context: "UniqueId",
         }),
     }
+}
+
+/// Encode the `UniqueId` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_unique_id(value: &String) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_utf8(Tag::Anonymous, &value)
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Decode the `CapabilityMinima` attribute value.
@@ -810,6 +990,17 @@ pub fn decode_specification_version(tlv: &[u8]) -> Result<u32, ClusterError> {
     }
 }
 
+/// Encode the `SpecificationVersion` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_specification_version(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `MaxPathsPerInvoke` attribute value.
 ///
 /// # Errors
@@ -827,6 +1018,17 @@ pub fn decode_max_paths_per_invoke(tlv: &[u8]) -> Result<u16, ClusterError> {
     }
 }
 
+/// Encode the `MaxPathsPerInvoke` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_max_paths_per_invoke(value: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
+}
+
 /// Decode the `ConfigurationVersion` attribute value.
 ///
 /// # Errors
@@ -842,4 +1044,15 @@ pub fn decode_configuration_version(tlv: &[u8]) -> Result<u32, ClusterError> {
             context: "ConfigurationVersion",
         }),
     }
+}
+
+/// Encode the `ConfigurationVersion` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_configuration_version(value: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value))
+        .expect("infallible: vec writer");
+    buf
 }

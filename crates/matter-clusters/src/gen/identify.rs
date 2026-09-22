@@ -37,6 +37,7 @@ pub mod attribute_id {
 
 /// `EffectIdentifierEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EffectIdentifierEnum {
     /// Blink = 0.
     Blink,
@@ -85,6 +86,7 @@ impl EffectIdentifierEnum {
 
 /// `EffectVariantEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EffectVariantEnum {
     /// Default = 0.
     Default,
@@ -113,6 +115,7 @@ impl EffectVariantEnum {
 
 /// `IdentifyTypeEnum` (enum8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum IdentifyTypeEnum {
     /// None = 0.
     None,
@@ -204,6 +207,17 @@ pub fn decode_identify_type(tlv: &[u8]) -> Result<IdentifyTypeEnum, ClusterError
             context: "IdentifyType",
         }),
     }
+}
+
+/// Encode the `IdentifyType` attribute value as a standalone TLV element.
+#[must_use]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)] // Vec-backed TlvWriter is infallible.
+pub fn encode_identify_type(value: IdentifyTypeEnum) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut w = TlvWriter::new(&mut buf);
+    w.put_uint(Tag::Anonymous, u64::from(value.to_raw()))
+        .expect("infallible: vec writer");
+    buf
 }
 
 /// Encode the `Identify` command request payload.
