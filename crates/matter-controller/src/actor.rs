@@ -739,7 +739,7 @@ pub(crate) struct SubReceivers {
 /// What `handle_subscribe` returns to `Node::subscribe`: the report receivers
 /// and the `(session, subscription_id)` key (the `Node` adds the command sender
 /// to build the public [`Subscription`]).
-pub(crate) type SubEstablished = (SubReceivers, SubId, Duration);
+pub(crate) type SubEstablished = (SubReceivers, SubId);
 
 /// Maximum non-final chunks a single subscription notification may span before
 /// [`ReportReassembler`] drops the partial accumulation. Bounds memory against a
@@ -5568,7 +5568,6 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                         let _ = reply.send(Ok((
                             rx,
                             sub_id,
-                            Duration::from_secs(resp.max_interval as _),
                         )));
                     }
                 }
@@ -12954,7 +12953,6 @@ mod tests {
             tx: cmd_tx,
             key: SubId(1),
             cancelled: true, // suppress the Drop cancel (no live actor here)
-            max_report_interval: Duration::from_secs(1),
         };
 
         match sub.next().await {

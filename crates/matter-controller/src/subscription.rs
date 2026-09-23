@@ -1,7 +1,5 @@
 //! A live attribute subscription: reports arrive via [`Subscription::next`].
 
-use std::time::Duration;
-
 use matter_codec::Value;
 use matter_interaction::{AttributePath, EventReport};
 use tokio::sync::mpsc;
@@ -125,7 +123,6 @@ pub struct Subscription {
     pub(crate) tx: mpsc::Sender<Command>,
     pub(crate) key: crate::actor::SubId,
     pub(crate) cancelled: bool,
-    pub(crate) max_report_interval: Duration,
 }
 
 impl Subscription {
@@ -172,11 +169,6 @@ impl Subscription {
             .send(Command::CancelSubscription { key: self.key })
             .await
             .map_err(|_| Error::ControllerStopped)
-    }
-
-    /// Negotiated maximum reporting interval in seconds.
-    pub fn max_report_interval(&self) -> Duration {
-        self.max_report_interval
     }
 }
 

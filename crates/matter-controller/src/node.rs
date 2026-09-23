@@ -1537,14 +1537,13 @@ impl Node {
             })
             .await
             .map_err(|_| Error::ControllerStopped)?;
-        let (receivers, key, max_report_interval) = rx.await.map_err(|_| Error::ControllerStopped)??;
+        let (receivers, key) = rx.await.map_err(|_| Error::ControllerStopped)??;
         Ok(crate::subscription::Subscription {
             rx: receivers.report_rx,
             ctrl_rx: receivers.ctrl_rx,
             tx: self.tx.clone(),
             key,
             cancelled: false,
-            max_report_interval
         })
     }
 }
