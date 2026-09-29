@@ -22,6 +22,28 @@ From `0.1.0` onward the headings mean what they say, and
 while a crate is `0.x`, a **breaking change bumps the minor version** — these
 APIs have had no outside users yet and are expected to move.
 
+## matter-interaction 0.4.2
+
+Additive API only, contributed by @qwandor in #134. No behaviour or wire change.
+This is a patch release because nothing breaks: the existing `0.4` requirements
+in `matter-commissioning`, `matter-ota` and `matter-controller` already accept
+0.4.2, so none of them is re-released. `matter-controller` re-exports these
+types, so `cargo update` is enough to use the new API through it.
+
+### Added
+
+- **`const` constructors** so paths can be built in `const`/`static` items:
+  `ReadPath::new`, `ReadPath::concrete`, `ReadPath::cluster`, `ReadPath::all`,
+  `EventPath::concrete`, `EventPath::cluster` and `EventFilter::from_event_min`.
+- **`Hash`, `PartialOrd` and `Ord`** on `AttributePath`, `CommandPath`,
+  `ReadPath`, `EventPath` and `EventFilter`, so they can be keys in `HashMap`,
+  `HashSet` and `BTreeMap`. The ordering is field by field in declaration order.
+- **`Hash`** on `EventPriority` and `EventTimestamp`. These two deliberately do
+  **not** implement `Ord`. A derived order would follow variant declaration order,
+  not meaning: `EventTimestamp` would put `Epoch(1_700_000_000_000)` below
+  `System(5)`, even though the two come from different clocks. Both enums are
+  also `#[non_exhaustive]`, so a new variant would silently change the order.
+
 ## matter-transport 0.7.1 + matter-controller 0.15.0
 
 This release fixes subscriptions going silent after 256 reports on a session.
