@@ -52,6 +52,12 @@ events are buffered per handle (at most 256, oldest dropped), and `poll_results`
 and `poll_found` share one drain of the browse, so the order of the two calls
 does not matter.
 
+### matter-transport: Fixed — removed instances are no longer replayed
+
+`MdnsSdDiscovery` now drops an instance from the records it replays to a newly
+attached handle when the daemon reports it removed (record expiry or goodbye),
+so a late handle is never seeded with a device that has since gone away.
+
 ### matter-controller: Added — resubscribe on operational advert
 
 While a subscription is waiting to be re-established, the controller keeps its
