@@ -109,7 +109,7 @@ async fn group_cast_denied_without_acl_then_allowed_with_it() {
     node.write_group_key_map(&[GroupKeyMapEntry::new(GROUP_ID, KEY_SET_ID)])
         .await
         .expect("write_group_key_map");
-    node.add_group(1, GROUP_ID, "ace").await.expect("add_group");
+    integration_tests::fixture::add_group_or_explain(&node, 1, GROUP_ID, "ace").await;
 
     // 2. DENY leg: group-cast On with NO ACL grant. The device receives and
     //    decrypts the group command but denies it at AccessControl, so OnOff

@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use matter_controller::{AttestationTrust, FabricConfig, FileStore, MatterController, MatterTime};
+use matter_controller::{
+    AttestationTrust, Error, FabricConfig, FileStore, MatterController, MatterTime, Node,
+};
 
 use crate::dut::DutConfig;
 
@@ -67,4 +69,35 @@ pub async fn connect(cfg: &DutConfig) -> Result<(MatterController, u64)> {
         .node_id;
     std::fs::write(cfg.node_sidecar(), node_id.to_string()).context("writing node-id sidecar")?;
     Ok((controller, node_id))
+}
+
+/// IM status `INVALID_IN_STATE` (0xCB).
+const STATUS_INVALID_IN_STATE: u8 = 0xCB;
+
+/// `Groups::AddGroup` on `endpoint`, failing the test with an explicit diagnosis
+/// when the DUT answers `INVALID_IN_STATE`.
+///
+/// From Groups cluster revision 5 (Matter 1.5), a device that supports the
+/// Groupcast cluster owns group membership there and stubs `AddGroup` to return
+/// `INVALID_IN_STATE` (connectedhomeip #74101, merged 2026-09-12). matter-rust
+/// targets Matter 1.4 and has no Groupcast support yet, so against such a DUT the
+/// group tests cannot provision membership. The harness pins connectedhomeip to
+/// a 1.4 release for that reason; this message is what a future ref bump (or an
+/// unpinned local `CHIP_ROOT`) will hit, instead of a bare status code.
+///
+/// # Panics
+///
+/// On any `AddGroup` failure — this is a test fixture.
+pub async fn add_group_or_explain(node: &Node, endpoint: u16, group_id: u16, name: &str) {
+    match node.add_group(endpoint, group_id, name).await {
+        Ok(()) => {}
+        Err(Error::GroupCommandRejected(STATUS_INVALID_IN_STATE)) => panic!(
+            "add_group: the DUT rejected AddGroup with INVALID_IN_STATE (0xCB). \
+             Its Groups cluster is revision 5+ (Matter 1.5 soft-deprecation): group \
+             membership moved to the Groupcast cluster, which matter-rust does not \
+             support yet. Run the harness against a Matter 1.4 connectedhomeip \
+             (the nightly pins CHIP_REF=v1.4.2.0) or implement Groupcast."
+        ),
+        Err(e) => panic!("add_group: {e:?}"),
+    }
 }

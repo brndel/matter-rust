@@ -25,9 +25,12 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
-  # Pin the connectedhomeip ref the harness was validated against; bump
-  # deliberately when adopting a newer all-clusters-app.
-  CHIP_REF: master
+  # Pinned to the Matter 1.4 release our v1.0 targets. Tracking `master` broke
+  # the sweep silently from 2026-09-12: connectedhomeip #74101 (Groups cluster
+  # revision 5, Matter 1.5 soft-deprecation) stubs AddGroup with
+  # INVALID_IN_STATE on Groupcast devices, and matter-rust has no Groupcast yet.
+  # Bump deliberately, with the 1.5 work, never by following master.
+  CHIP_REF: v1.4.2.0
 
 jobs:
   integration:

@@ -76,9 +76,7 @@ async fn group_provision_acl_and_multicast() {
     node.write_group_key_map(&[GroupKeyMapEntry::new(GROUP_ID, KEY_SET_ID)])
         .await
         .expect("write_group_key_map");
-    node.add_group(1, GROUP_ID, "integ")
-        .await
-        .expect("add_group");
+    integration_tests::fixture::add_group_or_explain(&node, 1, GROUP_ID, "integ").await;
 
     // 3. THE required AccessControl entry: grant the group Operate. APPEND only —
     //    never replace/remove the existing admin entry (lockout safety).
