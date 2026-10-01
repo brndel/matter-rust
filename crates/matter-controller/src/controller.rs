@@ -909,6 +909,32 @@ impl MatterController {
         rx.await.unwrap_or(0)
     }
 
+    /// Test-only: see `Command::SetResubscribeSchedule`. Returns how many queued
+    /// resubscribes of `node_id` were changed (0 if the actor is gone).
+    #[cfg(test)]
+    pub(crate) async fn set_resubscribe_schedule(
+        &self,
+        node_id: u64,
+        retry_count: u32,
+        attempt_in: std::time::Duration,
+    ) -> usize {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(Command::SetResubscribeSchedule {
+                node_id,
+                retry_count,
+                attempt_in,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return 0;
+        }
+        rx.await.unwrap_or(0)
+    }
+
     /// Fetch the stored CASE resumption record for `node_id` from the actor's
     /// live state (deserialized; `None` if the device has none). Used by
     /// `serve_ota` to let the provider server accept the requestor's

@@ -1168,6 +1168,17 @@ pub(crate) enum Command {
     /// Test/diagnostic: how many live cached sessions exist.
     #[cfg(test)]
     SessionCount { reply: oneshot::Sender<usize> },
+    /// Test-only: set the retry count and next attempt time (`now +
+    /// attempt_in`) of every QUEUED resubscribe of `node_id`, replying with how
+    /// many were changed. Lets an end-to-end test put a subscription deep into
+    /// its backoff without waiting the real minutes.
+    #[cfg(test)]
+    SetResubscribeSchedule {
+        node_id: u64,
+        retry_count: u32,
+        attempt_in: Duration,
+        reply: oneshot::Sender<usize>,
+    },
 }
 
 /// A cached operational session to one device.
@@ -2748,6 +2759,26 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             #[cfg(test)]
             Command::SessionCount { reply } => {
                 let _ = reply.send(self.cache.len());
+            }
+            #[cfg(test)]
+            Command::SetResubscribeSchedule {
+                node_id,
+                retry_count,
+                attempt_in,
+                reply,
+            } => {
+                let attempt_at = Instant::now() + attempt_in;
+                let mut changed = 0usize;
+                for pr in self
+                    .resubscribes
+                    .iter_mut()
+                    .filter(|pr| pr.node_id == node_id)
+                {
+                    pr.retry_count = retry_count;
+                    pr.attempt_at = attempt_at;
+                    changed += 1;
+                }
+                let _ = reply.send(changed);
             }
         }
     }
@@ -20275,5 +20306,327 @@ mod tests {
         assert_eq!(actor.resolve_query_fabric, Some(QueryHandle(77)));
         actor.poll_advert_found(after_quiet_window());
         assert_eq!(queued_state(&actor, 1).0, 5);
+    }
+
+    /// The next unsecured frame on `io` (session id 0 in header bytes 1..3),
+    /// skipping secured ones for a session this device no longer holds.
+    async fn recv_unsecured(io: &InMemoryDatagram) -> Vec<u8> {
+        loop {
+            let (wire, _) = tokio::time::timeout(Duration::from_secs(30), io.recv_from())
+                .await
+                .expect("controller went quiet mid-handshake")
+                .unwrap();
+            if wire.len() >= 3 && wire[1] == 0 && wire[2] == 0 {
+                return wire;
+            }
+        }
+    }
+
+    /// Wait for the controller's next CASE `Sigma1` (opcode 0x30), ignoring
+    /// everything else. `None` if none arrives within 60 s.
+    async fn recv_sigma1(io: &InMemoryDatagram) -> Option<Vec<u8>> {
+        loop {
+            let Ok(Ok((wire, _))) =
+                tokio::time::timeout(Duration::from_secs(60), io.recv_from()).await
+            else {
+                return None;
+            };
+            let unsecured = wire.len() >= 3 && wire[1] == 0 && wire[2] == 0;
+            if !unsecured {
+                continue;
+            }
+            if matches!(decode_unsecured(&wire), Ok(m) if m.opcode == 0x30) {
+                return Some(wire);
+            }
+        }
+    }
+
+    /// Device side of one CASE handshake whose `Sigma1` was already received.
+    /// Declines resumption: a device that lost power holds no resumption
+    /// state, and the controller then completes a full handshake on the same
+    /// exchange.
+    async fn accept_case_from(
+        io: &InMemoryDatagram,
+        ctrl_addr: SocketAddr,
+        creds: CaseCredentials,
+        roots: TrustedRoots,
+        responder_session_id: u16,
+        sigma1_wire: &[u8],
+    ) -> (SessionManager, SessionId) {
+        let mut responder = CaseResponder::new(
+            creds,
+            roots,
+            responder_session_id,
+            MatterTime::from_unix_secs(2_000_000_000),
+        )
+        .unwrap();
+        let m = decode_unsecured(sigma1_wire).unwrap();
+        match responder.handle_sigma1(&m.payload).unwrap() {
+            Sigma1Outcome::NewSession => {}
+            Sigma1Outcome::ResumptionRequested { .. } => responder.reject_resumption().unwrap(),
+        }
+        let sigma2 = responder.next_message().unwrap();
+        let wire = encode_unsecured(
+            200,
+            m.exchange_id,
+            0x31,
+            ProtocolId::SECURE_CHANNEL,
+            false,
+            true,
+            Some(m.message_counter),
+            None,
+            &sigma2,
+        );
+        io.send_to(&wire, ctrl_addr).await.unwrap();
+        let p = recv_unsecured(io).await;
+        let m = decode_unsecured(&p).unwrap();
+        responder.handle_sigma3(&m.payload).unwrap();
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        let report = encode_unsecured(
+            201,
+            m.exchange_id,
+            0x40,
+            ProtocolId::SECURE_CHANNEL,
+            false,
+            true,
+            Some(m.message_counter),
+            None,
+            &body,
+        );
+        io.send_to(&report, ctrl_addr).await.unwrap();
+        let _ack = recv_unsecured(io).await;
+        let output = responder.finish().unwrap();
+        let mut sessions = SessionManager::new();
+        let sid = sessions.register_case(&output, SessionRole::Responder);
+        (sessions, sid)
+    }
+
+    /// Wait for a `SubscribeRequest` on `sid` and answer it like
+    /// `run_resubscribe_device`: a priming report, then a `SubscribeResponse`
+    /// with `wire_sub_id` and `max_interval`. Frames that do not decode on this
+    /// session are skipped. `false` if none arrives within 60 s.
+    async fn answer_subscribe(
+        io: &InMemoryDatagram,
+        ctrl_addr: SocketAddr,
+        sessions: &mut SessionManager,
+        sid: SessionId,
+        wire_sub_id: u32,
+        max_interval: u16,
+    ) -> bool {
+        loop {
+            let Ok(Ok((wire, _))) =
+                tokio::time::timeout(Duration::from_secs(60), io.recv_from()).await
+            else {
+                return false;
+            };
+            if wire.len() >= 3 && wire[1] == 0 && wire[2] == 0 {
+                continue;
+            }
+            let Ok(DecodeInboundOutput::AppMessage {
+                exchange_id,
+                opcode,
+                ..
+            }) = sessions.decode_inbound(&wire, Instant::now())
+            else {
+                continue;
+            };
+            if opcode != 0x03 {
+                continue;
+            }
+            let prime = build_report_data(1, 0x06, 0x0000, &matter_codec::Value::Bool(true));
+            let out = sessions
+                .encode_outbound(
+                    sid,
+                    Some(exchange_id),
+                    0x05,
+                    ProtocolId::INTERACTION_MODEL,
+                    &prime,
+                    MrpFlags { reliable: false },
+                    Instant::now(),
+                )
+                .unwrap();
+            io.send_to(&out.wire_bytes, ctrl_addr).await.unwrap();
+            let resp = build_subscribe_response(wire_sub_id, max_interval);
+            let out = sessions
+                .encode_outbound(
+                    sid,
+                    Some(exchange_id),
+                    0x04,
+                    ProtocolId::INTERACTION_MODEL,
+                    &resp,
+                    MrpFlags { reliable: false },
+                    Instant::now(),
+                )
+                .unwrap();
+            io.send_to(&out.wire_bytes, ctrl_addr).await.unwrap();
+            return true;
+        }
+    }
+
+    /// The device for the advert end-to-end test. First life: accept CASE and
+    /// one subscription at max interval 0 (liveness trips after
+    /// `LIVENESS_GRACE`). Then it loses power: it forgets the session and
+    /// answers nothing on it — not even MRP acks — as a rebooted device would.
+    /// Second life: accept the controller's next CASE handshake and answer that
+    /// session's `SubscribeRequest` (max interval 60, so the test ends before
+    /// liveness could trip again).
+    async fn run_rebooting_subscription_device(
+        io: InMemoryDatagram,
+        ctrl_addr: SocketAddr,
+        first_life: (CaseCredentials, TrustedRoots),
+        second_life: (CaseCredentials, TrustedRoots),
+    ) {
+        let Some(sigma1) = recv_sigma1(&io).await else {
+            return;
+        };
+        let (creds, roots) = first_life;
+        let (mut sessions, sid) =
+            accept_case_from(&io, ctrl_addr, creds, roots, 0x00D2, &sigma1).await;
+        if !answer_subscribe(&io, ctrl_addr, &mut sessions, sid, 0x1111_1111, 0).await {
+            return;
+        }
+        // Power loss: everything the first life knew is gone.
+        drop(sessions);
+        let Some(sigma1) = recv_sigma1(&io).await else {
+            return;
+        };
+        let (creds, roots) = second_life;
+        let (mut sessions, sid) =
+            accept_case_from(&io, ctrl_addr, creds, roots, 0x00D3, &sigma1).await;
+        let _ = answer_subscribe(&io, ctrl_addr, &mut sessions, sid, 0x2222_2222, 60).await;
+        keep_endpoint_open(io);
+    }
+
+    /// Spec test 15, end to end over the loopback harness: a subscription goes
+    /// silent (liveness), its retry fails against the powered-off device and is
+    /// pushed 10 minutes out at a high retry count; the device re-announces (a
+    /// found event plus its record on the subtype browse) and the subscription
+    /// is re-established within seconds.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // one linear scenario: subscribe, outage, backoff, advert, recovery
+    async fn an_operational_advert_reestablishes_a_backed_off_subscription() {
+        let Harness {
+            store,
+            ctrl_io,
+            dev_io,
+            ctrl_addr,
+            discovery,
+            device_creds,
+            device_roots,
+            device_node_id,
+        } = loopback_harness();
+        let state = crate::snapshot::deserialize(&store.load().unwrap().unwrap()).unwrap();
+        let second_life = mint_device_creds(&state, device_node_id);
+        let (watch, watch_state) = watch_discovery();
+        let record = MatterService::new(
+            discovery.instance_name.clone(),
+            ServiceKind::Operational,
+            vec![discovery.addr.ip()],
+            discovery.addr.port(),
+            std::collections::HashMap::new(),
+        );
+        // The device is on the network at the start.
+        watch_state
+            .lock()
+            .unwrap()
+            .subtype_records
+            .push(record.clone());
+
+        let device = tokio::spawn(run_rebooting_subscription_device(
+            dev_io,
+            ctrl_addr,
+            (device_creds, device_roots),
+            second_life,
+        ));
+        let controller = crate::controller::MatterController::with_components(
+            store,
+            ctrl_io,
+            watch,
+            Arc::new(SystemNocRng),
+            None,
+            crate::builder::DEFAULT_ADMIN_VENDOR_ID,
+        )
+        .expect("open");
+
+        let mut sub = tokio::time::timeout(
+            Duration::from_secs(10),
+            controller.node(device_node_id).subscribe(
+                &[matter_interaction::ReadPath::concrete(1, 0x06, 0x0000)],
+                &[],
+                1,
+                0,
+            ),
+        )
+        .await
+        .expect("subscribe must not hang")
+        .expect("subscribe");
+
+        // 1. The device loses power; liveness trips after LIVENESS_GRACE.
+        let lost = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match sub.next().await {
+                    Some(SubscriptionEvent::Resubscribing { .. }) => return true,
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        assert!(
+            matches!(lost, Ok(true)),
+            "liveness must time out (got {lost:?})"
+        );
+
+        // 2. The immediate retry fails against the dead session (MRP expiry)
+        //    and comes back to the queue. Push it 10 minutes out at retry 10,
+        //    as if several attempts had failed.
+        let backed_off = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if controller
+                    .set_resubscribe_schedule(device_node_id, 10, Duration::from_secs(600))
+                    .await
+                    == 1
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            backed_off.is_ok(),
+            "the failed retry must come back to the queue"
+        );
+
+        // 3. The device is back and re-announces: a new PTR on the fabric
+        //    subtype, with its record.
+        {
+            let mut s = watch_state.lock().unwrap();
+            s.subtype_records.push(record);
+            s.subtype_found.push(discovery.instance_name.clone());
+        }
+        let started = Instant::now();
+        let recovered = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match sub.next().await {
+                    Some(SubscriptionEvent::Established { .. }) => return true,
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        assert!(
+            matches!(recovered, Ok(true)),
+            "the advert must re-establish the subscription long before the 600 s retry \
+             (got {recovered:?})"
+        );
+        assert!(started.elapsed() < Duration::from_secs(15));
+
+        sub.cancel().await.ok();
+        let _ = tokio::time::timeout(Duration::from_secs(5), device).await;
     }
 }
