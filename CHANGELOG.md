@@ -56,7 +56,8 @@ does not matter.
 
 `MdnsSdDiscovery` now drops an instance from the records it replays to a newly
 attached handle when the daemon reports it removed (record expiry or goodbye),
-so a late handle is never seeded with a device that has since gone away.
+so a late handle is never seeded with a device the daemon has since reported
+removed (at record expiry or on a goodbye).
 
 ### matter-controller: Added — resubscribe on operational advert
 
