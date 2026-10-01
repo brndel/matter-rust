@@ -545,6 +545,14 @@ impl ReportSink {
     fn send_control(&self, event: SubscriptionEvent) -> bool {
         self.ctrl_tx.send(event).is_ok()
     }
+
+    /// Whether the consumer dropped BOTH receivers, so nothing can observe this
+    /// subscription again. The reap test `attempt_resubscribe` and
+    /// `reschedule_resubscribe` apply; an entry like this is reaped the next
+    /// time it fires.
+    fn consumer_gone(&self) -> bool {
+        self.report_tx.is_closed() && self.ctrl_tx.is_closed()
+    }
 }
 
 /// Per-subscription routing + resubscribe state, keyed by [`SubId`].
@@ -1320,7 +1328,11 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     /// (`_I<compressed-fabric-id>._sub._matter._tcp`,
     /// [`Discovery::query_operational_fabric`]) shared by every parked resolve.
     /// This is the browse a resolve normally opens and settles on; it is opened
-    /// the moment the first entry parks and released with [`Self::resolve_query`].
+    /// the moment the first entry parks, always through
+    /// [`Self::open_subtype_browse`]. It is also the **resubscribe watch**:
+    /// while any subscription is waiting to be re-established
+    /// ([`Self::resubscribe_watch_needed`]) it is kept open after the last
+    /// resolve settles, so a device that re-announces itself is seen.
     ///
     /// The subtype is the fast, reliable one: it narrows the browse to our own
     /// fabric, so a resolver that completes SRV/address resolution one discovered
@@ -1407,6 +1419,11 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     /// passes without capturing logs.
     #[cfg(test)]
     reschedule_causes: Vec<(SubId, String)>,
+    /// Test hook: the size of the resubscribe episode set at the top of every
+    /// [`Self::attempt_resubscribe`], so a test can prove the entries not yet
+    /// attempted stay visible during a `drive_resubscribes` pass.
+    #[cfg(test)]
+    episode_sizes_at_attempt: Vec<usize>,
 }
 
 /// Derived group-key material for a fabric, computed once per
@@ -1987,6 +2004,8 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             connect_done_rx,
             #[cfg(test)]
             reschedule_causes: Vec::new(),
+            #[cfg(test)]
+            episode_sizes_at_attempt: Vec::new(),
         }
     }
 
@@ -3335,14 +3354,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         // that — the full credential build (signer reconstruction from PKCS#8,
         // IPK derivation, cert clones) happens once, in `finish_spawn_connect`,
         // which may run many seconds later and wants a fresh validation clock.
-        let compressed = self.sole_fabric().and_then(|fabric| {
-            matter_crypto::derive_compressed_fabric_id(
-                fabric.rcac_cert.public_key().as_bytes(),
-                fabric.fabric_id,
-            )
-            .map_err(|e| Error::Operational(e.to_string()))
-        });
-        let compressed = match compressed {
+        let compressed = match self.sole_compressed_fabric_id() {
             Ok(c) => c,
             Err(e) => {
                 self.fail_connect_waiters(node_id, &e);
@@ -3376,20 +3388,17 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         // to wait for.
         let mut open_error: Option<Error> = None;
         if self.resolve_query_fabric.is_none() {
-            match self.discovery.query_operational_fabric(compressed) {
-                Ok(h) => self.resolve_query_fabric = Some(h),
-                Err(e) => {
-                    tracing::debug!(
-                        target: "matter_controller::actor",
-                        node_id,
-                        error = %e,
-                        "connect: fabric-subtype browse could not be opened; \
-                         falling back to the base-type browse",
-                    );
-                    open_error = Some(Error::from(
-                        matter_commissioning::driver::DriverError::Transport(e),
-                    ));
-                }
+            if let Err(e) = self.open_subtype_browse(compressed) {
+                tracing::debug!(
+                    target: "matter_controller::actor",
+                    node_id,
+                    error = %e,
+                    "connect: fabric-subtype browse could not be opened; \
+                     falling back to the base-type browse",
+                );
+                open_error = Some(Error::from(
+                    matter_commissioning::driver::DriverError::Transport(e),
+                ));
             }
         }
         if self.resolve_query.is_none() {
@@ -3551,40 +3560,162 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     }
 
     /// Last act of [`Self::run`]: abandon any parked resolve and release the
-    /// shared mDNS browse.
+    /// shared mDNS browses — the subtype one **unconditionally**.
     ///
     /// Dropping the actor is NOT enough. With a caller-supplied daemon
     /// (`MdnsSdDiscovery::with_daemon`, `owns_daemon == false`) nothing ever
     /// stops the browse, so a controller dropped mid-resolve would leave a
-    /// `_matter._tcp` browse running on that shared daemon forever.
+    /// `_matter._tcp` browse running on that shared daemon forever. The same
+    /// holds for the resubscribe watch: subscriptions may still be waiting, but
+    /// nothing will poll the browse again.
     fn shutdown_discovery(&mut self) {
         self.pending_resolves.clear();
         self.release_resolve_query_if_idle();
+        self.close_subtype_browse();
     }
 
-    /// Drop the shared operational browses (base type **and** fabric subtype)
-    /// once no resolve still needs them, so an idle controller holds no mDNS
-    /// query open.
+    /// Drop the shared operational browses once nothing needs them, so an idle
+    /// controller holds no mDNS query open.
+    ///
+    /// The **base-type** browse goes as soon as no resolve is parked —
+    /// unchanged, because a base browse left running beside the subtype one
+    /// re-discovers every instance on the link and starves the resolver
+    /// (#113, [`SUBTYPE_ONLY_WINDOW`]).
+    ///
+    /// The **fabric-subtype** browse goes only if, in addition, no subscription
+    /// is waiting to be re-established ([`Self::resubscribe_watch_needed`]):
+    /// while one is, the subtype browse is the resubscribe watch, which listens
+    /// for the device to re-announce itself.
     fn release_resolve_query_if_idle(&mut self) {
-        if self.pending_resolves.is_empty() {
-            // Disarm the delayed fallback along with the browses. Nothing is
-            // waiting on a record any more, so opening a base-type browse now
-            // would serve no resolve — and the next connect to park arms a fresh
-            // window, giving its subtype browse the same clear run at it.
-            self.resolve_base_after = None;
-            let base = self.resolve_query.take();
-            let subtype = self.resolve_query_fabric.take();
-            if let Some(handle) = base {
-                self.discovery.stop_query(handle);
+        if !self.pending_resolves.is_empty() {
+            return;
+        }
+        // Disarm the delayed fallback along with the browses. Nothing is
+        // waiting on a record any more, so opening a base-type browse now
+        // would serve no resolve — and the next connect to park arms a fresh
+        // window, giving its subtype browse the same clear run at it.
+        self.resolve_base_after = None;
+        if let Some(base) = self.resolve_query.take() {
+            // An injected `Discovery` that keeps the trait default for
+            // `query_operational_fabric` hands back the same handle for both
+            // browses. Stopping it here would also stop the subtype browse the
+            // watch may still hold, so a shared handle is left to the subtype
+            // release (below, or the watch's later one), which stops it once.
+            if self.resolve_query_fabric != Some(base) {
+                self.discovery.stop_query(base);
             }
-            // Skip a duplicate stop when the injected `Discovery` handed the
-            // same handle back for both (the trait default for
-            // `query_operational_fabric` is a base-type browse). `stop_query` is
-            // documented idempotent, so this is tidiness, not a requirement.
-            if let Some(handle) = subtype.filter(|h| Some(*h) != base) {
+        }
+        if !self.resubscribe_watch_needed() {
+            self.close_subtype_browse();
+        }
+    }
+
+    /// The sole fabric's compressed fabric id: the value that names both its
+    /// nodes' operational instance names and its DNS-SD subtype.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotCommissioned`] unless exactly one fabric exists;
+    /// [`Error::Operational`] if the derivation fails.
+    fn sole_compressed_fabric_id(&self) -> Result<[u8; 8], Error> {
+        let fabric = self.sole_fabric()?;
+        matter_crypto::derive_compressed_fabric_id(
+            fabric.rcac_cert.public_key().as_bytes(),
+            fabric.fabric_id,
+        )
+        .map_err(|e| Error::Operational(e.to_string()))
+    }
+
+    /// Open the fabric-subtype browse and hold it as `resolve_query_fabric`.
+    ///
+    /// The ONE place a subtype browse is opened: by [`Self::spawn_connect`] for
+    /// a parked resolve, and by the resubscribe watch. Going through one helper
+    /// is what lets both openers record the same bookkeeping, so a browse
+    /// opened for a connect is recognised by the watch instead of being closed
+    /// and reopened by it.
+    ///
+    /// The caller holds no subtype handle (`resolve_query_fabric` is `None`).
+    ///
+    /// # Errors
+    ///
+    /// The discovery's error if the browse cannot be opened; nothing is
+    /// recorded then.
+    fn open_subtype_browse(
+        &mut self,
+        compressed_fabric_id: [u8; 8],
+    ) -> matter_transport::Result<()> {
+        let handle = self
+            .discovery
+            .query_operational_fabric(compressed_fabric_id)?;
+        self.resolve_query_fabric = Some(handle);
+        Ok(())
+    }
+
+    /// Stop the fabric-subtype browse, if one is held, and forget it.
+    ///
+    /// Not stopped while the base-type handle is the very same handle (an
+    /// injected `Discovery` that keeps the trait default for
+    /// `query_operational_fabric` returns one handle for both): the base
+    /// release stops it then, once.
+    fn close_subtype_browse(&mut self) {
+        if let Some(handle) = self.resolve_query_fabric.take() {
+            if self.resolve_query != Some(handle) {
                 self.discovery.stop_query(handle);
             }
         }
+    }
+
+    /// Every subscription currently in a resubscribe episode, wherever it sits,
+    /// as `(sub id, node id, the consumer's sink)`:
+    ///
+    /// - **queued** in `resubscribes`, waiting for its attempt time;
+    /// - **in flight** as a `PendingReply::Subscribe` with no reply channel (a
+    ///   `SubscribeRequest` sent, its response not yet in);
+    /// - **connecting** as a `ConnectWaiter::Resubscribe` behind a CASE connect.
+    ///
+    /// These three are the complete set, except for the one entry
+    /// `attempt_resubscribe` is holding at that instant: `drive_resubscribes`
+    /// takes due entries out of the queue one at a time, only as it attempts
+    /// each, and `attempt_resubscribe` puts the entry into one of the other two
+    /// (or back in the queue) before anything that consults this set can run.
+    /// The only such path inside an attempt — `enqueue_connect_waiter` →
+    /// `spawn_connect` → `drive_pending_resolves`, which can run the advert
+    /// path — starts after the waiter is already on `pending_connects`. The
+    /// actor is single-threaded, so nothing else runs in between.
+    fn resubscribe_episode_entries(&self) -> impl Iterator<Item = (SubId, u64, &ReportSink)> + '_ {
+        let queued = self
+            .resubscribes
+            .iter()
+            .map(|pr| (pr.sub_id, pr.node_id, &pr.tx));
+        let in_flight = self.pending.values().filter_map(|p| match &p.reply {
+            PendingReply::Subscribe {
+                sub_id,
+                reply: None,
+                node_id,
+                report_tx,
+                ..
+            } => Some((*sub_id, *node_id, report_tx)),
+            _ => None,
+        });
+        let connecting =
+            self.pending_connects
+                .values()
+                .flatten()
+                .filter_map(|waiter| match waiter {
+                    ConnectWaiter::Resubscribe(pr) => Some((pr.sub_id, pr.node_id, &pr.tx)),
+                    _ => None,
+                });
+        queued.chain(in_flight).chain(connecting)
+    }
+
+    /// Whether the resubscribe watch must hold the fabric-subtype browse open:
+    /// true while some subscription whose consumer is still listening is in a
+    /// resubscribe episode ([`Self::resubscribe_episode_entries`]). An entry
+    /// whose consumer dropped both receivers does not count; it only waits to
+    /// be reaped and must not keep a browse open until then.
+    fn resubscribe_watch_needed(&self) -> bool {
+        self.resubscribe_episode_entries()
+            .any(|(_, _, tx)| !tx.consumer_gone())
     }
 
     /// Drop any parked resolve for `node_id` (it has been resolved, failed, or
@@ -6035,19 +6166,24 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         });
     }
 
-    /// Fire any due resubscribe attempts.
+    /// Fire any due resubscribe attempts, one at a time.
+    ///
+    /// A due entry is taken out of `resubscribes` only at the moment it is
+    /// attempted, never batched into a local list first. An attempt can reach
+    /// the advert path (`attempt_resubscribe` → `enqueue_connect_waiter` →
+    /// `spawn_connect` → `drive_pending_resolves`), and everything that path
+    /// consults — [`Self::resubscribe_episode_entries`], `trigger_resubscribe`,
+    /// the resubscribe watch — must still see the entries not yet attempted.
+    ///
+    /// The loop ends: every iteration removes one entry, and an entry put back
+    /// during the pass is either rescheduled into the future (the backoff at
+    /// retry 1 or more is at least 3 s) or pulled to the trigger's own `now`,
+    /// which is never earlier than this pass's; a pulled entry is due, and a due
+    /// entry is never pulled again, so that can happen at most once per entry.
     async fn drive_resubscribes(&mut self) {
         let now = Instant::now();
-        let mut due = Vec::new();
-        let mut i = 0;
-        while i < self.resubscribes.len() {
-            if self.resubscribes[i].attempt_at <= now {
-                due.push(self.resubscribes.swap_remove(i));
-            } else {
-                i += 1;
-            }
-        }
-        for pr in due {
+        while let Some(i) = self.resubscribes.iter().position(|pr| pr.attempt_at <= now) {
+            let pr = self.resubscribes.swap_remove(i);
             self.attempt_resubscribe(pr).await;
         }
     }
@@ -6058,6 +6194,9 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// OFF the actor loop (the CASE handshake no longer blocks other
     /// sessions) and resume on completion; a missing fabric reschedules on backoff.
     async fn attempt_resubscribe(&mut self, pr: PendingResubscribe) {
+        #[cfg(test)]
+        self.episode_sizes_at_attempt
+            .push(self.resubscribe_episode_entries().count());
         // A consumer that dropped both receivers can never observe this
         // subscription again — reap instead of retrying forever (the drop-side
         // cancel is lossy `try_send`, so this is the reliable reap point).
@@ -18168,5 +18307,316 @@ mod tests {
             .await
             .expect("remove_group must succeed");
         device.await.unwrap();
+    }
+
+    // --- resubscribe watch (spec 2026-10-01) ---
+
+    const WATCH_SUBTYPE_HANDLE: QueryHandle = QueryHandle(77);
+    const WATCH_BASE_HANDLE: QueryHandle = QueryHandle(1);
+    const WATCH_NODE_A: u64 = 0x0A;
+    const WATCH_NODE_B: u64 = 0x0B;
+
+    /// Test-visible state behind a [`WatchDiscovery`]. The actor owns the
+    /// discovery, so a test keeps an `Arc` clone of this to inject records and
+    /// found events and to read the counters.
+    #[derive(Default)]
+    struct WatchDiscoveryState {
+        /// Drain-once record queues, per browse kind (mdns-sd-like).
+        subtype_records: Vec<MatterService>,
+        base_records: Vec<MatterService>,
+        /// Drain-once found-event queues (instance names), per browse kind.
+        subtype_found: Vec<String>,
+        base_found: Vec<String>,
+        /// Every `query_operational_fabric` / `query` call, failed ones included.
+        subtype_opens: usize,
+        base_opens: usize,
+        /// Every `stop_query` call, in order.
+        stops: Vec<QueryHandle>,
+        /// Every `poll_found` call, in order.
+        found_polls: Vec<QueryHandle>,
+        /// Return the base handle from `query_operational_fabric` too, as a
+        /// `Discovery` that keeps the trait default does.
+        equal_handles: bool,
+        /// Make every open fail.
+        fail_opens: bool,
+        /// Make only `query_operational_fabric` fail (a daemon that refuses the
+        /// subtype but serves the base type).
+        fail_subtype_opens: bool,
+    }
+
+    /// A [`Discovery`] with separate subtype and base browses, each with its
+    /// own drain-once record and found-event queue, plus open/stop/poll
+    /// counters, an equal-handles mode and an open-failure mode.
+    struct WatchDiscovery(Arc<std::sync::Mutex<WatchDiscoveryState>>);
+
+    impl Discovery for WatchDiscovery {
+        fn publish(&mut self, _s: &MatterService) -> matter_transport::Result<()> {
+            Ok(())
+        }
+        fn unpublish(&mut self, _n: &str, _k: ServiceKind) -> matter_transport::Result<()> {
+            Ok(())
+        }
+        fn query(&mut self, _k: ServiceKind) -> matter_transport::Result<QueryHandle> {
+            let mut s = self.0.lock().unwrap();
+            s.base_opens += 1;
+            if s.fail_opens {
+                return Err(matter_transport::Error::Mdns(
+                    "injected open failure".into(),
+                ));
+            }
+            Ok(WATCH_BASE_HANDLE)
+        }
+        fn query_operational_fabric(
+            &mut self,
+            _compressed_fabric_id: [u8; 8],
+        ) -> matter_transport::Result<QueryHandle> {
+            let mut s = self.0.lock().unwrap();
+            s.subtype_opens += 1;
+            if s.fail_opens || s.fail_subtype_opens {
+                return Err(matter_transport::Error::Mdns(
+                    "injected open failure".into(),
+                ));
+            }
+            Ok(if s.equal_handles {
+                WATCH_BASE_HANDLE
+            } else {
+                WATCH_SUBTYPE_HANDLE
+            })
+        }
+        fn stop_query(&mut self, h: QueryHandle) {
+            self.0.lock().unwrap().stops.push(h);
+        }
+        fn poll_results(&mut self, h: QueryHandle) -> Vec<MatterService> {
+            let mut s = self.0.lock().unwrap();
+            if h == WATCH_SUBTYPE_HANDLE {
+                std::mem::take(&mut s.subtype_records)
+            } else if h == WATCH_BASE_HANDLE {
+                std::mem::take(&mut s.base_records)
+            } else {
+                Vec::new()
+            }
+        }
+        fn poll_found(&mut self, h: QueryHandle) -> Vec<String> {
+            let mut s = self.0.lock().unwrap();
+            s.found_polls.push(h);
+            if h == WATCH_SUBTYPE_HANDLE {
+                std::mem::take(&mut s.subtype_found)
+            } else if h == WATCH_BASE_HANDLE {
+                std::mem::take(&mut s.base_found)
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    fn watch_discovery() -> (WatchDiscovery, Arc<std::sync::Mutex<WatchDiscoveryState>>) {
+        let state = Arc::new(std::sync::Mutex::new(WatchDiscoveryState::default()));
+        (WatchDiscovery(Arc::clone(&state)), state)
+    }
+
+    /// [`actor_with_one_fabric`] over a caller-supplied [`Discovery`].
+    fn actor_with_one_fabric_using<D: Discovery>(discovery: D) -> Actor<InMemoryDatagram, D> {
+        let (io, peer) = InMemoryDatagram::pair();
+        keep_endpoint_open(peer);
+        let fabric = {
+            let cfg = FabricConfig {
+                fabric_id: 0x0A0B_0C0D_0E0F_1011,
+                rcac_id: 1,
+                commissioner_node_id: 1,
+                validity: (
+                    MatterTime::from_unix_secs(1_700_000_000),
+                    MatterTime::NO_EXPIRY,
+                ),
+                issue_icac: false,
+            };
+            crate::fabric::create_fabric(&cfg, &SystemNocRng).unwrap()
+        };
+        Actor::new(
+            io,
+            discovery,
+            Arc::new(MemStore::default()),
+            Arc::new(SystemNocRng),
+            ControllerState {
+                fabrics: vec![fabric],
+            },
+            None,
+            crate::builder::DEFAULT_ADMIN_VENDOR_ID,
+        )
+    }
+
+    /// Review focus 4: a connect that parks while a resubscribe episode waits
+    /// still gets its base-type fallback, and releasing it stops only the base:
+    /// the subtype browse stays, because it is the resubscribe watch.
+    #[tokio::test]
+    async fn release_keeps_the_subtype_browse_while_a_resubscribe_episode_waits() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let (queued, _queued_reports, _queued_ctrl) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(queued);
+        let (connecting, _connecting_reports, _connecting_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(
+            fabric_id,
+            WATCH_NODE_B,
+            ConnectWaiter::Resubscribe(connecting),
+        );
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+
+        // The subtype answered nothing within the window: the base fallback opens.
+        actor.resolve_base_after = Some(just_past());
+        actor.drive_pending_resolves();
+        assert_eq!(actor.resolve_query, Some(WATCH_BASE_HANDLE));
+
+        // B's resolve is abandoned; nothing is parked any more.
+        actor.cancel_pending_resolve(WATCH_NODE_B);
+        assert!(actor.pending_resolves.is_empty());
+        assert_eq!(
+            state.lock().unwrap().stops,
+            vec![WATCH_BASE_HANDLE],
+            "only the base goes"
+        );
+        assert_eq!(actor.resolve_query, None);
+        assert_eq!(
+            actor.resolve_query_fabric,
+            Some(WATCH_SUBTYPE_HANDLE),
+            "the subtype browse is the resubscribe watch while A waits"
+        );
+    }
+
+    /// Review focus 4, equal handles: a `Discovery` that keeps the trait
+    /// default hands back ONE handle for both browses. The base release must
+    /// not stop it while the watch holds it; it is stopped exactly once, when
+    /// the watch lets go (here: at shutdown).
+    #[tokio::test]
+    async fn a_handle_shared_by_both_browses_is_stopped_once_when_the_watch_lets_go() {
+        let (discovery, state) = watch_discovery();
+        state.lock().unwrap().equal_handles = true;
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let (queued, _queued_reports, _queued_ctrl) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(queued);
+        let (connecting, _connecting_reports, _connecting_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(
+            fabric_id,
+            WATCH_NODE_B,
+            ConnectWaiter::Resubscribe(connecting),
+        );
+        actor.resolve_base_after = Some(just_past());
+        actor.drive_pending_resolves();
+        assert_eq!(actor.resolve_query, Some(WATCH_BASE_HANDLE));
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_BASE_HANDLE));
+
+        actor.cancel_pending_resolve(WATCH_NODE_B);
+        assert!(
+            state.lock().unwrap().stops.is_empty(),
+            "the shared handle is the watch's browse: not stopped by the base release"
+        );
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_BASE_HANDLE));
+
+        actor.shutdown_discovery();
+        assert_eq!(
+            state.lock().unwrap().stops,
+            vec![WATCH_BASE_HANDLE],
+            "stopped exactly once"
+        );
+    }
+
+    /// Spec test 9: shutdown releases the watch's browse even though
+    /// resubscribes are still queued — a caller-supplied daemon would
+    /// otherwise run it forever.
+    #[tokio::test]
+    async fn shutdown_releases_the_watch_with_resubscribes_still_queued() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let (connecting, _connecting_reports, _connecting_ctrl) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 0, Instant::now());
+        actor.enqueue_connect_waiter(
+            fabric_id,
+            WATCH_NODE_A,
+            ConnectWaiter::Resubscribe(connecting),
+        );
+        // The connect fails: the episode goes back to the queue, still waiting.
+        actor.fail_connect_waiters(WATCH_NODE_A, &Error::Operational("resolve expired".into()));
+        assert_eq!(actor.resubscribes.len(), 1);
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+
+        actor.shutdown_discovery();
+        assert_eq!(state.lock().unwrap().stops, vec![WATCH_SUBTYPE_HANDLE]);
+        assert_eq!(actor.resolve_query_fabric, None);
+    }
+
+    /// An episode whose consumer dropped both receivers is reaped when it next
+    /// fires; it must not hold the browse open until then.
+    #[tokio::test]
+    async fn release_closes_the_subtype_browse_when_only_dead_consumers_wait() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let (queued, report_rx, ctrl_rx) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        drop(report_rx);
+        drop(ctrl_rx);
+        actor.resubscribes.push(queued);
+        let (connecting, connecting_reports, connecting_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        drop(connecting_reports);
+        drop(connecting_ctrl);
+        actor.enqueue_connect_waiter(
+            fabric_id,
+            WATCH_NODE_B,
+            ConnectWaiter::Resubscribe(connecting),
+        );
+        actor.cancel_pending_resolve(WATCH_NODE_B);
+        assert_eq!(state.lock().unwrap().stops, vec![WATCH_SUBTYPE_HANDLE]);
+        assert_eq!(actor.resolve_query_fabric, None);
+    }
+
+    /// While `drive_resubscribes` works through several due entries, the ones
+    /// not yet attempted must still sit in `resubscribes`, i.e. in the episode
+    /// set: an attempt can reach `trigger_resubscribe` and the watch
+    /// bookkeeping (`attempt_resubscribe` → `enqueue_connect_waiter` →
+    /// `spawn_connect` → `drive_pending_resolves`), and an entry parked in a
+    /// local batch would be invisible to both.
+    #[tokio::test]
+    async fn every_waiting_resubscribe_stays_visible_while_another_is_attempted() {
+        // No fabric: every attempt fails at once and is rescheduled into the
+        // future, so the pass also has to end.
+        let (io, _peer) = InMemoryDatagram::pair();
+        let mut actor = Actor::new(
+            io,
+            NullDiscovery,
+            Arc::new(MemStore::default()),
+            Arc::new(SystemNocRng),
+            ControllerState { fabrics: vec![] },
+            None,
+            crate::builder::DEFAULT_ADMIN_VENDOR_ID,
+        );
+        let (first, _first_reports, _first_ctrl) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 2, just_past());
+        let (second, _second_reports, _second_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 2, just_past());
+        actor.resubscribes.extend([first, second]);
+        tokio::time::timeout(Duration::from_secs(5), actor.drive_resubscribes())
+            .await
+            .expect("the pass must end");
+        assert_eq!(
+            actor.episode_sizes_at_attempt,
+            vec![1, 1],
+            "the entry not being attempted must stay in the queue (a local batch gives [0, 1])"
+        );
+        assert_eq!(
+            actor.reschedule_causes.len(),
+            2,
+            "each due entry attempted exactly once"
+        );
+        assert!(actor
+            .resubscribes
+            .iter()
+            .all(|pr| pr.attempt_at > Instant::now()));
     }
 }
