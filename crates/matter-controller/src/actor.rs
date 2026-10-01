@@ -3506,6 +3506,11 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// whole [`RESOLVE_DEADLINE`], stalling every other session behind one
     /// unreachable device.
     ///
+    /// When the subtype browse was already held (usually by the resubscribe
+    /// watch) and the target has no fresh cached record, the browse's records
+    /// are first replayed through a short-lived second handle
+    /// ([`Self::replay_subtype_records`]), as a freshly opened browse would.
+    ///
     /// Only a credential/clock/query-setup failure fails the parked waiters here;
     /// a device that simply never answers fails at its deadline instead.
     fn spawn_connect(&mut self, fabric_id: u64, node_id: u64) {
@@ -3546,6 +3551,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         // browse at once rather than after the window — there is nothing left
         // to wait for.
         let mut open_error: Option<Error> = None;
+        let subtype_was_held = self.resolve_query_fabric.is_some();
         if self.resolve_query_fabric.is_none() {
             if let Err(e) = self.open_subtype_browse(compressed) {
                 tracing::debug!(
@@ -3586,6 +3592,15 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             });
             self.fail_connect_waiters(node_id, &err);
             return;
+        }
+        // A browse held from before this connect (usually the resubscribe
+        // watch) will not hand us records it already delivered; a freshly
+        // opened one replays them by itself. See `replay_subtype_records`.
+        if subtype_was_held
+            && self.resolve_query_fabric_cfid == Some(compressed)
+            && !self.has_fresh_record(&target)
+        {
+            self.replay_subtype_records(compressed, node_id);
         }
         self.park_resolve(fabric_id, node_id, target);
         // Settle immediately rather than draining the browse here: every
@@ -3630,6 +3645,83 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             target,
             deadline: Instant::now() + RESOLVE_DEADLINE,
         });
+    }
+
+    /// Whether `seen_records` holds an entry for `instance_name` that is still
+    /// inside [`SEEN_RECORD_TTL`] — i.e. one the next settle pass would match.
+    /// An older entry is about to be aged out by that pass's
+    /// [`record_seen`](Self::record_seen), so it counts as absent.
+    fn has_fresh_record(&self, instance_name: &str) -> bool {
+        let now = Instant::now();
+        self.seen_records
+            .get(&Self::record_key(instance_name))
+            .is_some_and(|r| now.saturating_duration_since(r.seen) < SEEN_RECORD_TTL)
+    }
+
+    /// Re-read the held subtype browse's records through a second, short-lived
+    /// handle, for a connect whose target has no fresh `seen_records` entry.
+    ///
+    /// Why it is needed: mdns-sd emits `ServiceResolved` only for a new or
+    /// changed record, and `MdnsSdDiscovery` replays its per-browse `surfaced`
+    /// cache only to a **newly attached** handle. While the resubscribe watch
+    /// holds the subtype browse, a healthy node's record is drained once,
+    /// then ages out of `seen_records` after [`SEEN_RECORD_TTL`]; unchanged
+    /// refreshes emit nothing. A connect that merely reused the held handle
+    /// would then park, wait out [`SUBTYPE_ONLY_WINDOW`], and open the base-type
+    /// fallback — whose eventual stop wipes the daemon's SRV/TXT records for
+    /// every instance. Before the watch existed every such connect opened a
+    /// fresh browse and got the replay; this restores it.
+    ///
+    /// Attaching a second handle to the same subtype is cheap and safe: the
+    /// adapter shares one daemon browse per service type and seeds the new
+    /// handle from `surfaced`, and because the held handle stays attached,
+    /// stopping this one releases only the handle — the daemon browse and its
+    /// cache survive. The held handle, its cfid, and the advert quiet window
+    /// are not touched.
+    ///
+    /// The replayed records go through [`record_seen`](Self::record_seen), the
+    /// same path as every drain, so TTL and address filtering apply; the
+    /// caller's settle pass then matches the target against the cache. Found
+    /// events are never replayed to a new handle, but this drain may fan new
+    /// ones out; each also reached the held handle, which
+    /// [`Self::poll_advert_found`] reads, so this handle's copy is discarded.
+    ///
+    /// A failed attach is logged at `debug` and otherwise ignored: the connect
+    /// falls through to the parked resolve exactly as before. A handle equal
+    /// to one already held is not an independent attach — there is no replay
+    /// to take, and draining its found events or stopping it would eat the
+    /// watch's adverts or tear the watch down — so it is left alone.
+    fn replay_subtype_records(&mut self, compressed_fabric_id: [u8; 8], node_id: u64) {
+        let handle = match self
+            .discovery
+            .query_operational_fabric(compressed_fabric_id)
+        {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!(
+                    target: "matter_controller::actor",
+                    node_id,
+                    error = %e,
+                    "connect: second subtype handle for the replay could not be \
+                     attached; resolving on the held browse alone",
+                );
+                return;
+            }
+        };
+        if self.resolve_query_fabric == Some(handle) || self.resolve_query == Some(handle) {
+            return;
+        }
+        let services = self.discovery.poll_results(handle);
+        let _ = self.discovery.poll_found(handle);
+        self.discovery.stop_query(handle);
+        tracing::debug!(
+            target: "matter_controller::actor",
+            node_id,
+            replayed = services.len(),
+            "connect: target not cached; replayed the held subtype browse \
+             through a short-lived second handle",
+        );
+        self.record_seen(&services, Instant::now(), BROWSE_SUBTYPE);
     }
 
     /// `seen_records` key for an operational instance name. Matter instance
@@ -18812,6 +18904,9 @@ mod tests {
     // --- resubscribe watch (spec 2026-10-01) ---
 
     const WATCH_SUBTYPE_HANDLE: QueryHandle = QueryHandle(77);
+    /// The second subtype handle a [`WatchDiscovery`] in late-attach replay
+    /// mode hands out while [`WATCH_SUBTYPE_HANDLE`] is still attached.
+    const WATCH_REPLAY_HANDLE: QueryHandle = QueryHandle(78);
     const WATCH_BASE_HANDLE: QueryHandle = QueryHandle(1);
     const WATCH_NODE_A: u64 = 0x0A;
     const WATCH_NODE_B: u64 = 0x0B;
@@ -18842,11 +18937,31 @@ mod tests {
         /// Make only `query_operational_fabric` fail (a daemon that refuses the
         /// subtype but serves the base type).
         fail_subtype_opens: bool,
+        /// mdns-sd-like late-attach replay; `None` (the default) keeps every
+        /// subtype open returning the one subtype handle.
+        replay: Option<LateAttachReplay>,
+    }
+
+    /// [`WatchDiscoveryState::replay`]: a `query_operational_fabric` made while
+    /// [`WATCH_SUBTYPE_HANDLE`] is still attached returns
+    /// [`WATCH_REPLAY_HANDLE`] instead, seeded with `surfaced` (the adapter's
+    /// `surfaced` replay). The attached handle itself is never re-sent those
+    /// records, as mdns-sd never re-emits an unchanged one.
+    #[derive(Default)]
+    struct LateAttachReplay {
+        /// The last record surfaced per instance on the subtype browse.
+        surfaced: Vec<MatterService>,
+        /// [`WATCH_REPLAY_HANDLE`]'s drain-once record queue.
+        replay_records: Vec<MatterService>,
+        /// Whether [`WATCH_SUBTYPE_HANDLE`] is attached (handed out, not yet
+        /// stopped).
+        subtype_attached: bool,
     }
 
     /// A [`Discovery`] with separate subtype and base browses, each with its
     /// own drain-once record and found-event queue, plus open/stop/poll
-    /// counters, an equal-handles mode and an open-failure mode.
+    /// counters, an equal-handles mode, an open-failure mode and an
+    /// mdns-sd-like late-attach replay mode.
     struct WatchDiscovery(Arc<std::sync::Mutex<WatchDiscoveryState>>);
 
     impl Discovery for WatchDiscovery {
@@ -18877,14 +18992,26 @@ mod tests {
                     "injected open failure".into(),
                 ));
             }
-            Ok(if s.equal_handles {
-                WATCH_BASE_HANDLE
-            } else {
-                WATCH_SUBTYPE_HANDLE
-            })
+            if s.equal_handles {
+                return Ok(WATCH_BASE_HANDLE);
+            }
+            if let Some(r) = s.replay.as_mut() {
+                if r.subtype_attached {
+                    r.replay_records = r.surfaced.clone();
+                    return Ok(WATCH_REPLAY_HANDLE);
+                }
+                r.subtype_attached = true;
+            }
+            Ok(WATCH_SUBTYPE_HANDLE)
         }
         fn stop_query(&mut self, h: QueryHandle) {
-            self.0.lock().unwrap().stops.push(h);
+            let mut s = self.0.lock().unwrap();
+            if h == WATCH_SUBTYPE_HANDLE {
+                if let Some(r) = s.replay.as_mut() {
+                    r.subtype_attached = false;
+                }
+            }
+            s.stops.push(h);
         }
         fn poll_results(&mut self, h: QueryHandle) -> Vec<MatterService> {
             let mut s = self.0.lock().unwrap();
@@ -18892,6 +19019,11 @@ mod tests {
                 std::mem::take(&mut s.subtype_records)
             } else if h == WATCH_BASE_HANDLE {
                 std::mem::take(&mut s.base_records)
+            } else if h == WATCH_REPLAY_HANDLE {
+                s.replay
+                    .as_mut()
+                    .map(|r| std::mem::take(&mut r.replay_records))
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             }
@@ -19223,10 +19355,18 @@ mod tests {
         actor.resubscribes[0].attempt_at = just_past();
         actor.drive_resubscribes().await;
         assert_eq!(actor.pending_resolves.len(), 1, "the connect parked");
+        // The second open is the connect's replay attach (A is not cached).
+        // This fake hands the held handle back for it, which the actor must
+        // recognise and leave alone: not stopped, its found events not eaten.
         assert_eq!(
             state.lock().unwrap().subtype_opens,
-            1,
-            "the held handle is reused"
+            2,
+            "the held handle is reused; only the replay attach is extra"
+        );
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+        assert!(
+            !state.lock().unwrap().stops.contains(&WATCH_SUBTYPE_HANDLE),
+            "a replay attach that returned the held handle must not stop it"
         );
         actor.reconcile_resubscribe_watch(Instant::now());
 
@@ -19250,7 +19390,7 @@ mod tests {
             "nothing closed the watch: {:?}",
             s.stops
         );
-        assert_eq!(s.subtype_opens, 1);
+        assert_eq!(s.subtype_opens, 2, "the watch open and the replay attach");
         drop(s);
         assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
     }
@@ -19338,6 +19478,158 @@ mod tests {
         let s = state.lock().unwrap();
         assert_eq!(s.subtype_opens, 1, "kept, not closed and reopened");
         assert!(s.stops.is_empty(), "{:?}", s.stops);
+    }
+
+    /// What [`held_watch_with_b_surfaced`] returns: the actor, the fake's
+    /// state, and A's consumer receivers (kept alive by the caller).
+    type HeldWatch = (
+        Actor<InMemoryDatagram, WatchDiscovery>,
+        Arc<std::sync::Mutex<WatchDiscoveryState>>,
+        mpsc::Receiver<SubscriptionEvent>,
+        mpsc::UnboundedReceiver<SubscriptionEvent>,
+    );
+
+    /// The setup every held-watch replay test starts from: an mdns-sd-like
+    /// discovery whose subtype browse has already surfaced `WATCH_NODE_B`'s
+    /// record (so it will never re-emit it to the attached handle), and an
+    /// actor whose resubscribe watch holds that browse because `WATCH_NODE_A`
+    /// waits. The returned receivers keep A's consumer alive.
+    fn held_watch_with_b_surfaced() -> HeldWatch {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        state.lock().unwrap().replay = Some(LateAttachReplay {
+            surfaced: vec![op_record(&operational_instance_name(cfid, WATCH_NODE_B))],
+            ..LateAttachReplay::default()
+        });
+        let (pr, reports, ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+        assert_eq!(state.lock().unwrap().subtype_opens, 1);
+        (actor, state, reports, ctrl)
+    }
+
+    /// Final-review F1: while the watch holds the subtype browse, a connect to
+    /// a healthy node whose record the actor no longer has cached gets the
+    /// fresh-browse replay a per-connect browse used to give it — through a
+    /// second, short-lived handle — and resolves in the immediate settle pass,
+    /// with no base-type fallback. The extra handle is drained (records AND
+    /// found events) and stopped; the watch handle is left alone.
+    #[tokio::test]
+    async fn a_connect_behind_a_held_watch_resolves_from_the_replay_without_the_base_fallback() {
+        let (mut actor, state, _reports, _ctrl) = held_watch_with_b_surfaced();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        assert!(
+            !actor.seen_records.contains_key(
+                &Actor::<InMemoryDatagram, WatchDiscovery>::record_key(&operational_instance_name(
+                    cfid,
+                    WATCH_NODE_B
+                ))
+            ),
+            "precondition: B is not cached"
+        );
+
+        let (pr_b, _b_reports, _b_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(fabric_id, WATCH_NODE_B, ConnectWaiter::Resubscribe(pr_b));
+
+        assert!(
+            actor.pending_resolves.is_empty(),
+            "B must resolve in spawn_connect's own settle pass, not park"
+        );
+        assert_eq!(actor.resolve_base_after, None, "no fallback armed");
+        let s = state.lock().unwrap();
+        assert_eq!(s.base_opens, 0, "the base-type fallback was never opened");
+        assert_eq!(s.subtype_opens, 2, "one watch open + one replay attach");
+        assert_eq!(
+            s.stops,
+            vec![WATCH_REPLAY_HANDLE],
+            "only the short-lived replay handle is stopped"
+        );
+        assert!(
+            s.found_polls.contains(&WATCH_REPLAY_HANDLE),
+            "the replay handle's found buffer is drained before it is stopped"
+        );
+        drop(s);
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+        assert_eq!(actor.resolve_query, None);
+    }
+
+    /// Final-review F1, expired entry: a cached record older than
+    /// `SEEN_RECORD_TTL` counts as absent — the replay attach still happens and
+    /// the connect resolves off the refreshed entry.
+    #[tokio::test]
+    async fn a_connect_behind_a_held_watch_replays_when_the_cached_record_has_expired() {
+        let (mut actor, state, _reports, _ctrl) = held_watch_with_b_surfaced();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let b_name = operational_instance_name(cfid, WATCH_NODE_B);
+        // Built by subtraction because the entry must predate the test by more
+        // than the TTL; a host up for under a minute cannot express that, and
+        // the absent-entry test above still covers the replay there.
+        let Some(expired_at) = Instant::now().checked_sub(SEEN_RECORD_TTL + Duration::from_secs(1))
+        else {
+            eprintln!("host uptime below SEEN_RECORD_TTL; expired-entry case skipped");
+            return;
+        };
+        actor.record_seen(&[op_record(&b_name)], expired_at, BROWSE_SUBTYPE);
+
+        let (pr_b, _b_reports, _b_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(fabric_id, WATCH_NODE_B, ConnectWaiter::Resubscribe(pr_b));
+
+        assert!(actor.pending_resolves.is_empty(), "resolved, not parked");
+        let s = state.lock().unwrap();
+        assert_eq!(s.base_opens, 0);
+        assert_eq!(s.subtype_opens, 2);
+        assert_eq!(s.stops, vec![WATCH_REPLAY_HANDLE]);
+    }
+
+    /// Final-review F1, fresh entry: a record still inside `SEEN_RECORD_TTL`
+    /// needs no replay, so no second handle is attached.
+    #[tokio::test]
+    async fn a_connect_behind_a_held_watch_with_a_fresh_record_attaches_nothing() {
+        let (mut actor, state, _reports, _ctrl) = held_watch_with_b_surfaced();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let b_name = operational_instance_name(cfid, WATCH_NODE_B);
+        actor.record_seen(&[op_record(&b_name)], Instant::now(), BROWSE_SUBTYPE);
+
+        let (pr_b, _b_reports, _b_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(fabric_id, WATCH_NODE_B, ConnectWaiter::Resubscribe(pr_b));
+
+        assert!(actor.pending_resolves.is_empty());
+        let s = state.lock().unwrap();
+        assert_eq!(s.subtype_opens, 1, "no replay attach for a fresh record");
+        assert!(s.stops.is_empty(), "{:?}", s.stops);
+    }
+
+    /// Final-review F1, failed attach: a daemon that refuses the second handle
+    /// costs nothing but the replay — the connect parks on the held watch as
+    /// before, with the delayed base fallback armed, and nothing is stopped.
+    #[tokio::test]
+    async fn a_failed_replay_attach_falls_through_to_the_parked_resolve() {
+        let (mut actor, state, _reports, _ctrl) = held_watch_with_b_surfaced();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        state.lock().unwrap().fail_subtype_opens = true;
+
+        let (pr_b, _b_reports, _b_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(fabric_id, WATCH_NODE_B, ConnectWaiter::Resubscribe(pr_b));
+
+        assert_eq!(actor.pending_resolves.len(), 1, "parked as before");
+        assert!(
+            actor.resolve_base_after.is_some(),
+            "fallback armed as before"
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.subtype_opens, 2, "the replay attach was tried");
+        assert!(s.stops.is_empty(), "{:?}", s.stops);
+        drop(s);
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
     }
 
     /// Spec test 11: failing opens are retried no more often than
