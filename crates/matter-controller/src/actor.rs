@@ -592,6 +592,30 @@ struct PendingResubscribe {
     tx: ReportSink,
 }
 
+/// Why [`Actor::on_pending_timeout`] gave up on an in-flight request. Carried
+/// into the resubscribe failure log, because the two timeouts say different
+/// things about the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingTimeoutCause {
+    /// MRP retransmitted the request its full budget and it was never
+    /// acknowledged: the device is unreachable, or no longer holds the session.
+    MrpExpired,
+    /// The request was acknowledged but no Interaction Model response arrived
+    /// within the response deadline.
+    ResponseDeadline,
+}
+
+impl std::fmt::Display for PendingTimeoutCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::MrpExpired => "MRP retransmissions exhausted: the request was never acknowledged",
+            Self::ResponseDeadline => {
+                "response deadline elapsed: the request was acknowledged but never answered"
+            }
+        })
+    }
+}
+
 /// An in-flight request awaiting its response, keyed in `pending` by
 /// `(session, exchange)`. The actor owns recv centrally, so a round-trip/read
 /// cannot block on its own response — it registers one of these and the central
@@ -1378,6 +1402,11 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     connect_done_tx: mpsc::Sender<ConnectCompletion>,
     /// Receiver half, drained by an arm of the [`Self::run`] `select!`.
     connect_done_rx: mpsc::Receiver<ConnectCompletion>,
+    /// Test hook: the cause passed to every [`Self::reschedule_resubscribe`],
+    /// with its subscription, so tests can assert on the value each call site
+    /// passes without capturing logs.
+    #[cfg(test)]
+    reschedule_causes: Vec<(SubId, String)>,
 }
 
 /// Derived group-key material for a fabric, computed once per
@@ -1956,6 +1985,8 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             connect_outbound_rx,
             connect_done_tx,
             connect_done_rx,
+            #[cfg(test)]
+            reschedule_causes: Vec::new(),
         }
     }
 
@@ -2467,6 +2498,13 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                             self.sessions.remove(c.session_id);
                         }
                     }
+                }
+                // This node's resubscribe waiters are deleted below (the
+                // `resubscribes.retain`), so drop them here rather than let
+                // `fail_connect_waiters` reschedule them first — that would log
+                // "next attempt scheduled" for attempts that will never happen.
+                if let Some(waiters) = self.pending_connects.get_mut(&node_id) {
+                    waiters.retain(|w| !matches!(w, ConnectWaiter::Resubscribe(_)));
                 }
                 // Fail any parked waiters and drop the connect bookkeeping for
                 // this node. Reuse the existing helper — it removes
@@ -3960,7 +3998,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 match waiter {
                     ConnectWaiter::Command(cmd) => fail_command(cmd, fail_err()),
                     ConnectWaiter::ResendPending(p) => Self::fail_pending(p, fail_err()),
-                    ConnectWaiter::Resubscribe(pr) => self.reschedule_resubscribe(pr),
+                    ConnectWaiter::Resubscribe(pr) => self.reschedule_resubscribe(pr, err),
                 }
             }
         }
@@ -4072,7 +4110,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     },
                 );
             }
-            Err(_) => self.reschedule_resubscribe(pr),
+            Err(e) => self.reschedule_resubscribe(pr, &e),
         }
     }
 
@@ -5630,7 +5668,12 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     exchange_id,
                     ..
                 } => {
-                    self.on_pending_timeout(session_id, exchange_id).await;
+                    self.on_pending_timeout(
+                        session_id,
+                        exchange_id,
+                        PendingTimeoutCause::MrpExpired,
+                    )
+                    .await;
                 }
                 // `MrpEvent` is `#[non_exhaustive]`; ignore future timer
                 // events in the controller's MRP pump.
@@ -5679,7 +5722,8 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 continue;
             }
             if matches!(&p.reply, PendingReply::Subscribe { reply: None, .. }) {
-                self.on_pending_timeout(key.0, key.1).await;
+                self.on_pending_timeout(key.0, key.1, PendingTimeoutCause::ResponseDeadline)
+                    .await;
                 continue;
             }
             // A READ is idempotent, so a fired response deadline on one takes
@@ -5714,7 +5758,8 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     "operational response deadline elapsed on a read; \
                      reconnecting and re-sending once (reads are idempotent)"
                 );
-                self.on_pending_timeout(key.0, key.1).await;
+                self.on_pending_timeout(key.0, key.1, PendingTimeoutCause::ResponseDeadline)
+                    .await;
                 continue;
             }
             // `get` above only borrowed; remove for real now.
@@ -5737,7 +5782,14 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// A pending op timed out. If it ran on a stale cached session and has not
     /// yet been retried, evict the session, reconnect, and re-send once on the
     /// new session; otherwise resolve it with a timeout error.
-    async fn on_pending_timeout(&mut self, session_id: SessionId, exchange_id: u16) {
+    ///
+    /// `cause` says which timeout fired; it reaches the resubscribe failure log.
+    async fn on_pending_timeout(
+        &mut self,
+        session_id: SessionId,
+        exchange_id: u16,
+        cause: PendingTimeoutCause,
+    ) {
         let Some(p) = self.pending.remove(&(session_id, exchange_id)) else {
             return;
         };
@@ -5776,18 +5828,21 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                         }
                     }
                 }
-                self.reschedule_resubscribe(PendingResubscribe {
-                    sub_id,
-                    attempt_at: Instant::now(),
-                    node_id,
-                    paths,
-                    event_paths,
-                    event_filters,
-                    min_interval,
-                    max_interval,
-                    retry_count,
-                    tx: report_tx,
-                });
+                self.reschedule_resubscribe(
+                    PendingResubscribe {
+                        sub_id,
+                        attempt_at: Instant::now(),
+                        node_id,
+                        paths,
+                        event_paths,
+                        event_filters,
+                        min_interval,
+                        max_interval,
+                        retry_count,
+                        tx: report_tx,
+                    },
+                    &cause,
+                );
             }
             return;
         }
@@ -6009,9 +6064,12 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         if pr.tx.report_tx.is_closed() && pr.tx.ctrl_tx.is_closed() {
             return;
         }
-        let Ok(fabric_id) = self.sole_fabric().map(|f| f.fabric_id) else {
-            self.reschedule_resubscribe(pr);
-            return;
+        let fabric_id = match self.sole_fabric() {
+            Ok(fabric) => fabric.fabric_id,
+            Err(e) => {
+                self.reschedule_resubscribe(pr, &e);
+                return;
+            }
         };
         if let Some((sid, peer)) = self
             .cache
@@ -6024,16 +6082,39 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         }
     }
 
-    /// Reschedule a failed attempt with the next backoff step (retry forever).
-    fn reschedule_resubscribe(&mut self, mut pr: PendingResubscribe) {
+    /// Reschedule a failed attempt with the next backoff step (retry forever),
+    /// and log the failure.
+    ///
+    /// `cause` is what ended the attempt: the connect error, the send error,
+    /// the missing fabric, or which of the two timeouts fired
+    /// ([`PendingTimeoutCause`]). It is only displayed. Before this line
+    /// existed a failed attempt left no trace at all, so a device that stayed
+    /// unsubscribed for minutes could not be diagnosed from a field log.
+    fn reschedule_resubscribe(
+        &mut self,
+        mut pr: PendingResubscribe,
+        cause: &dyn std::fmt::Display,
+    ) {
         // Same reap guard as `attempt_resubscribe`: a consumer that dropped
         // both receivers can never observe this subscription again.
         if pr.tx.report_tx.is_closed() && pr.tx.ctrl_tx.is_closed() {
             return;
         }
+        let failed_attempt = pr.retry_count;
         pr.retry_count = pr.retry_count.saturating_add(1);
         let wait = resubscribe_backoff(self.rng.as_ref(), pr.retry_count);
         pr.attempt_at = Instant::now() + wait;
+        tracing::debug!(
+            target: "matter_controller::actor",
+            node = format_args!("{:016X}", pr.node_id),
+            sub_id = pr.sub_id.0,
+            attempt = failed_attempt,
+            next_wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+            cause = %cause,
+            "resubscribe attempt failed; next attempt scheduled",
+        );
+        #[cfg(test)]
+        self.reschedule_causes.push((pr.sub_id, cause.to_string()));
         self.resubscribes.push(pr);
     }
 
@@ -12377,6 +12458,221 @@ mod tests {
         );
     }
 
+    /// An instant an hour out: a queued resubscribe that will not fire during a test.
+    fn far_future() -> Instant {
+        Instant::now() + Duration::from_secs(3600)
+    }
+
+    /// An instant one second ago: already due.
+    fn just_past() -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("process uptime exceeds one second")
+    }
+
+    /// A resubscribe record for `node_id`, shaped like the one
+    /// `begin_resubscribe` builds. The consumer's receivers are returned so the
+    /// caller keeps them alive: an entry whose receivers are both dropped is
+    /// one the actor treats as reaped.
+    fn test_pending_resubscribe(
+        sub_id: u64,
+        node_id: u64,
+        retry_count: u32,
+        attempt_at: Instant,
+    ) -> (
+        PendingResubscribe,
+        mpsc::Receiver<SubscriptionEvent>,
+        mpsc::UnboundedReceiver<SubscriptionEvent>,
+    ) {
+        let (tx, report_rx, ctrl_rx) = test_report_sink();
+        (
+            PendingResubscribe {
+                sub_id: SubId(sub_id),
+                attempt_at,
+                node_id,
+                paths: vec![matter_interaction::ReadPath::all()],
+                event_paths: vec![],
+                event_filters: vec![],
+                min_interval: 1,
+                max_interval: 30,
+                retry_count,
+                tx,
+            },
+            report_rx,
+            ctrl_rx,
+        )
+    }
+
+    /// Register `pr` as an in-flight resubscribe attempt under `key`: a
+    /// `Subscribe` pending with no reply channel, exactly as
+    /// `resume_resubscribe` registers one.
+    fn seed_inflight_resubscribe<D: Discovery>(
+        actor: &mut Actor<InMemoryDatagram, D>,
+        key: (SessionId, u16),
+        pr: PendingResubscribe,
+        response_deadline: Instant,
+    ) {
+        actor.pending.insert(
+            key,
+            Pending {
+                response_deadline,
+                node_id: pr.node_id,
+                peer: "127.0.0.1:5540".parse().unwrap(),
+                request: PendingRequest {
+                    opcode: OP_SUBSCRIBE_REQUEST,
+                    protocol_id: ProtocolId::INTERACTION_MODEL,
+                    payload: vec![],
+                },
+                retried: true,
+                reply: PendingReply::Subscribe {
+                    sub_id: pr.sub_id,
+                    reply: None,
+                    report_tx: pr.tx,
+                    report_rx: None,
+                    priming: Box::new(ReportReassembler::default()),
+                    node_id: pr.node_id,
+                    paths: pr.paths,
+                    event_paths: pr.event_paths,
+                    event_filters: pr.event_filters,
+                    min_interval: pr.min_interval,
+                    max_interval: pr.max_interval,
+                    retry_count: pr.retry_count,
+                },
+            },
+        );
+    }
+
+    /// Spec test 14: `fail_connect_waiters` hands its own error to the
+    /// reschedule (and so to the failure log).
+    #[test]
+    fn reschedule_cause_from_a_failed_connect_is_the_connect_error() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, _report_rx, _ctrl_rx) = test_pending_resubscribe(1, 0x42, 3, Instant::now());
+        actor
+            .pending_connects
+            .insert(0x42, vec![ConnectWaiter::Resubscribe(pr)]);
+        let err = Error::Operational("handshake refused".into());
+        actor.fail_connect_waiters(0x42, &err);
+        assert_eq!(actor.reschedule_causes, vec![(SubId(1), err.to_string())]);
+        assert_eq!(actor.resubscribes[0].retry_count, 4, "attempt 3 failed");
+    }
+
+    /// Spec test 14: a send failure in `resume_resubscribe` is no longer
+    /// discarded as `Err(_)`.
+    #[tokio::test]
+    async fn reschedule_cause_from_a_failed_send_is_the_send_error() {
+        let mut actor = actor_with_one_fabric();
+        let peer: SocketAddr = "127.0.0.1:5540".parse().unwrap();
+        // No session 999 exists, so encoding the SubscribeRequest fails; take
+        // the expected text from that same failure.
+        let expected = actor
+            .send_request(
+                SessionId(999),
+                peer,
+                OP_SUBSCRIBE_REQUEST,
+                ProtocolId::INTERACTION_MODEL,
+                &[],
+            )
+            .await
+            .expect_err("unknown session")
+            .to_string();
+        let (pr, _report_rx, _ctrl_rx) = test_pending_resubscribe(2, 0x42, 0, Instant::now());
+        actor.resume_resubscribe(pr, SessionId(999), peer).await;
+        assert_eq!(actor.reschedule_causes, vec![(SubId(2), expected)]);
+    }
+
+    /// Spec test 14: with no sole fabric, `attempt_resubscribe` passes the
+    /// `sole_fabric()` error.
+    #[tokio::test]
+    async fn reschedule_cause_without_a_fabric_is_the_fabric_error() {
+        let (io, _peer) = InMemoryDatagram::pair();
+        let mut actor = Actor::new(
+            io,
+            NullDiscovery,
+            Arc::new(MemStore::default()),
+            Arc::new(SystemNocRng),
+            ControllerState { fabrics: vec![] },
+            None,
+            crate::builder::DEFAULT_ADMIN_VENDOR_ID,
+        );
+        // `FabricEntry` is not `Debug` (it holds key material), so
+        // `expect_err` is unavailable; `clippy::err_expect` forbids
+        // `.err().expect(..)`.
+        let Err(no_fabric) = actor.sole_fabric() else {
+            panic!("an actor with no fabrics has no sole fabric");
+        };
+        let expected = no_fabric.to_string();
+        let (pr, _report_rx, _ctrl_rx) = test_pending_resubscribe(3, 0x42, 0, Instant::now());
+        actor.attempt_resubscribe(pr).await;
+        assert_eq!(actor.reschedule_causes, vec![(SubId(3), expected)]);
+    }
+
+    /// Spec test 14: MRP expiry names itself.
+    #[tokio::test]
+    async fn reschedule_cause_on_mrp_expiry_names_the_mrp_timeout() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, _report_rx, _ctrl_rx) = test_pending_resubscribe(4, 0x42, 1, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (SessionId(7), 0x10), pr, far_future());
+        actor
+            .on_pending_timeout(SessionId(7), 0x10, PendingTimeoutCause::MrpExpired)
+            .await;
+        assert_eq!(
+            actor.reschedule_causes,
+            vec![(SubId(4), PendingTimeoutCause::MrpExpired.to_string())]
+        );
+    }
+
+    /// Spec test 14: the response-deadline caller names the deadline, through
+    /// the real `drive_response_deadlines` path.
+    #[tokio::test]
+    async fn reschedule_cause_on_response_deadline_names_the_deadline() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, _report_rx, _ctrl_rx) = test_pending_resubscribe(5, 0x42, 1, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (SessionId(7), 0x11), pr, just_past());
+        actor.drive_response_deadlines().await;
+        assert_eq!(
+            actor.reschedule_causes,
+            vec![(SubId(5), PendingTimeoutCause::ResponseDeadline.to_string())]
+        );
+    }
+
+    /// The two timeout causes must read differently in a log: they say
+    /// different things about the device.
+    #[test]
+    fn pending_timeout_causes_read_differently() {
+        let mrp = PendingTimeoutCause::MrpExpired.to_string();
+        let deadline = PendingTimeoutCause::ResponseDeadline.to_string();
+        assert_ne!(mrp, deadline);
+        assert!(mrp.contains("never acknowledged"), "{mrp}");
+        assert!(deadline.contains("never answered"), "{deadline}");
+    }
+
+    /// Spec test 14: forgetting a node deletes its resubscribe waiters, so it
+    /// must not first log them as "next attempt scheduled".
+    #[tokio::test]
+    async fn forget_node_does_not_reschedule_the_waiters_it_deletes() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, _report_rx, _ctrl_rx) = test_pending_resubscribe(6, 0x42, 2, Instant::now());
+        actor
+            .pending_connects
+            .insert(0x42, vec![ConnectWaiter::Resubscribe(pr)]);
+        let (reply, rx) = oneshot::channel();
+        actor
+            .dispatch_ready(Command::ForgetNode {
+                node_id: 0x42,
+                reply,
+            })
+            .await;
+        let _ = rx.await.unwrap();
+        assert!(
+            actor.reschedule_causes.is_empty(),
+            "deleted waiters must not be rescheduled first: {:?}",
+            actor.reschedule_causes
+        );
+        assert!(actor.resubscribes.is_empty());
+        assert!(!actor.pending_connects.contains_key(&0x42));
+    }
+
     /// Build an actor with one real fabric in state so `sole_fabric()` (and thus
     /// the cache-eviction path in `on_pending_timeout`) is exercised. Discovery
     /// is null, so any `connect()` the timeout path attempts will fail without
@@ -12765,7 +13061,9 @@ mod tests {
 
         // Op B is still pending on the superseded session S; fire its timeout.
         seed_pending_round_trip(&mut actor, old_session, 0xABCD, node_id);
-        actor.on_pending_timeout(old_session, 0xABCD).await;
+        actor
+            .on_pending_timeout(old_session, 0xABCD, PendingTimeoutCause::MrpExpired)
+            .await;
 
         // The healthy current session S' is still cached and untouched.
         let cached = actor
@@ -12803,7 +13101,9 @@ mod tests {
         // The pending op is on the same session that is cached; its timeout must
         // evict the cache (connect then fails under NullDiscovery, leaving it empty).
         seed_pending_round_trip(&mut actor, session, 0xABCD, node_id);
-        actor.on_pending_timeout(session, 0xABCD).await;
+        actor
+            .on_pending_timeout(session, 0xABCD, PendingTimeoutCause::MrpExpired)
+            .await;
 
         assert!(
             !actor.cache.contains_key(&(fabric_id, node_id)),
