@@ -744,6 +744,75 @@ impl MatterController {
         rx.await.map_err(|_| Error::ControllerStopped)?
     }
 
+    /// Re-establish `node_id`'s subscriptions **now** if they are waiting to be
+    /// retried, instead of waiting out the retry backoff.
+    ///
+    /// When a device stops reporting, the controller retries its subscriptions
+    /// on chip's backoff (`ComputeTimeTillNextSubscription`): the first retry is
+    /// immediate, later ones wait up to about 63 minutes (about 92 once past the
+    /// Fibonacci cap). A device that comes back during a wait stays
+    /// unsubscribed until the wait ends. Call this when you learn the device is
+    /// reachable again — your own mDNS browse saw it, it sent an ICD check-in,
+    /// your network reported it — and every subscription of `node_id` that is
+    /// waiting to be re-established is pulled forward:
+    ///
+    /// - a retry that is **scheduled** fires immediately, with its backoff reset
+    ///   to the start of the sequence;
+    /// - a retry already **in progress** keeps running (a duplicate attempt is
+    ///   never started), but its backoff is reset, so if it fails the next try
+    ///   comes seconds later, not minutes.
+    ///
+    /// This is chip's `ReadClient::TriggerResubscribeIfScheduled` together with
+    /// `ResetResubscriptionBackoff`, as Apple's `Matter.framework` calls them
+    /// when it sees an operational advert.
+    ///
+    /// It is **not throttled**: every call acts. The controller's own
+    /// advert-triggered pulls are limited to one per subscription per 30 s;
+    /// calls here ignore that limit, but count toward it.
+    ///
+    /// # You may not need to call this
+    ///
+    /// While a subscription waits, the controller watches its fabric's
+    /// operational mDNS subtype and does this itself when the device publishes
+    /// a new advertisement. That covers most Wi-Fi and Ethernet devices. It
+    /// does **not** reliably cover:
+    ///
+    /// - Thread devices behind a border router whose SRP advertising proxy kept
+    ///   serving their records while they were offline (no new advertisement
+    ///   appears when they return);
+    /// - an outage shorter than the device's advertisement TTL (120 s on
+    ///   chip-based devices, up to 75 minutes on others), unless it rebooted
+    ///   gracefully;
+    /// - a device that returns within 5 s of the watch starting;
+    /// - a custom [`Discovery`] passed to
+    ///   [`MatterControllerBuilder::discovery`](crate::MatterControllerBuilder::discovery)
+    ///   that does not override both
+    ///   [`query_operational_fabric`](matter_transport::Discovery::query_operational_fabric)
+    ///   and [`poll_found`](matter_transport::Discovery::poll_found). The default
+    ///   `MdnsSdDiscovery` overrides both.
+    ///
+    /// In those cases, call this from whatever signal you have.
+    ///
+    /// Returns how many subscriptions it affected: scheduled retries pulled
+    /// forward plus in-progress retries whose backoff it reset. `Ok(0)` means
+    /// none of `node_id`'s subscriptions was waiting to be re-established: it is
+    /// subscribed and healthy, has no subscriptions, or is not a node this
+    /// controller knows. A subscription whose
+    /// [`Subscription`](crate::subscription::Subscription) was dropped is not
+    /// counted.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ControllerStopped`] if the owning task has stopped.
+    pub async fn resubscribe_now(&self, node_id: u64) -> Result<usize, Error> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ResubscribeNow { node_id, reply })
+            .await
+            .map_err(|_| Error::ControllerStopped)?;
+        rx.await.map_err(|_| Error::ControllerStopped)
+    }
+
     /// Handle addressing a device by node id (single-fabric).
     #[must_use]
     pub fn node(&self, node_id: u64) -> Node {

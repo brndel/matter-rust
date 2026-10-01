@@ -405,6 +405,16 @@ const WATCH_OPEN_RETRY: std::time::Duration = std::time::Duration::from_secs(10)
 /// at most a second to a recovery that was going to take minutes.
 const ADVERT_WATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Minimum time between two **advert-triggered** pulls of one subscription
+/// ([`Actor::trigger_resubscribe`]).
+///
+/// A pull resets the backoff, so a device that re-announces in a burst, or
+/// keeps appearing and failing, must not hold its retries at the shortest step
+/// forever. 30 s is the default response deadline: a pulled attempt has normally
+/// succeeded or failed by then. `resubscribe_now` ignores it (the caller asked)
+/// but its pulls still count toward it.
+const ADVERT_PULL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// chip `GetFibonacciForIndex` (F(0)=0, F(1)=1, F(2)=1, F(3)=2, …).
 fn fibonacci(n: u32) -> u64 {
     let (mut a, mut b) = (0u64, 1u64);
@@ -638,6 +648,16 @@ impl std::fmt::Display for PendingTimeoutCause {
             }
         })
     }
+}
+
+/// What asked [`Actor::trigger_resubscribe`] to pull resubscribes forward.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TriggerSource {
+    /// The resubscribe watch saw the node publish a new operational PTR record.
+    /// Subject to [`ADVERT_PULL_COOLDOWN`].
+    Advert,
+    /// `MatterController::resubscribe_now`. Not throttled: the caller asked.
+    Api,
 }
 
 /// An in-flight request awaiting its response, keyed in `pending` by
@@ -1119,6 +1139,16 @@ pub(crate) enum Command {
     },
     /// Cancel the subscription identified by its `(session, subscription_id)` key.
     CancelSubscription { key: SubId },
+    /// Pull every resubscribe episode of `node_id` forward: a scheduled retry
+    /// fires now with its backoff reset, one in progress keeps running with its
+    /// backoff reset. Replies with how many subscriptions were affected. See
+    /// [`MatterController::resubscribe_now`](crate::MatterController::resubscribe_now).
+    /// A local-state verb: `command_target_node` returns `None` for it (its `_`
+    /// arm, as for `CancelSubscription`), so it never starts a connect itself.
+    ResubscribeNow {
+        node_id: u64,
+        reply: oneshot::Sender<usize>,
+    },
     /// Test/diagnostic: how many live cached sessions exist.
     #[cfg(test)]
     SessionCount { reply: oneshot::Sender<usize> },
@@ -1261,6 +1291,17 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     save_gate: Arc<std::sync::Mutex<u64>>,
     /// Scheduled resubscribe attempts (fired from the timer arm when due).
     resubscribes: Vec<PendingResubscribe>,
+    /// When each subscription was last pulled forward by
+    /// [`Self::trigger_resubscribe`], for [`ADVERT_PULL_COOLDOWN`].
+    ///
+    /// Kept here rather than on [`PendingResubscribe`] because
+    /// [`Self::on_pending_timeout`] rebuilds a `PendingResubscribe` from a
+    /// `PendingReply::Subscribe`, which would drop a per-entry field. Pruned
+    /// wherever a subscription leaves its resubscribe episode — established
+    /// (`resolve_subscribe`), cancelled, forgotten, or reaped
+    /// (`begin_resubscribe`, `attempt_resubscribe`, `reschedule_resubscribe`) —
+    /// so it never outlives the episodes it describes.
+    resubscribe_pulled_at: HashMap<SubId, Instant>,
     /// Learned set of `(cluster_id, attr_or_command_id)` paths the device has
     /// rejected with `NEEDS_TIMED_INTERACTION` — a write/invoke to one of these
     /// skips the (wasted) plain attempt and goes straight to a timed interaction.
@@ -2004,6 +2045,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             snapshot_seq: 0,
             save_gate: Arc::new(std::sync::Mutex::new(0)),
             resubscribes: Vec::new(),
+            resubscribe_pulled_at: HashMap::new(),
             timed_paths: std::collections::HashSet::new(),
             commission_tx,
             commission_rx,
@@ -2593,6 +2635,10 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 self.remove_subscriptions_for_node(node_id);
                 self.resubscribes.retain(|pr| pr.node_id != node_id);
                 self.pending.retain(|_, p| p.node_id != node_id);
+                // Their advert cooldowns go with the episodes.
+                let live = self.resubscribe_episode_sub_ids();
+                self.resubscribe_pulled_at
+                    .retain(|sub_id, _| live.contains(sub_id));
                 let outcome = if removed {
                     match self.durable_save_inputs() {
                         Ok(job) => save_offloaded(job).await.map(|()| true),
@@ -2669,6 +2715,14 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 // re-insert a SubEntry on its response — a benign tiny window
                 // closed by the consumer's next cancel/Drop.
                 self.resubscribes.retain(|pr| pr.sub_id != key);
+                self.resubscribe_pulled_at.remove(&key);
+            }
+            Command::ResubscribeNow { node_id, reply } => {
+                let _ = reply.send(self.trigger_resubscribe(
+                    node_id,
+                    TriggerSource::Api,
+                    Instant::now(),
+                ));
             }
             #[cfg(test)]
             Command::SessionCount { reply } => {
@@ -3771,6 +3825,179 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     fn resubscribe_watch_needed(&self) -> bool {
         self.resubscribe_episode_entries()
             .any(|(_, _, tx)| !tx.consumer_gone())
+    }
+
+    /// Pull `node_id`'s resubscribes forward because the node is likely
+    /// reachable again; returns how many subscriptions were affected.
+    ///
+    /// For every subscription of `node_id` in a resubscribe episode whose
+    /// consumer is still listening (and, for [`TriggerSource::Advert`], not
+    /// pulled within [`ADVERT_PULL_COOLDOWN`]):
+    ///
+    /// - **queued** with its attempt in the future: backoff reset to the start
+    ///   (`retry_count = 0`) and `attempt_at = now`, so the existing
+    ///   `drive_resubscribes` fires it on the next pass. Counted.
+    /// - **queued and already due**: left alone — it fires this pass anyway. Not
+    ///   counted.
+    /// - **in flight** (a `Subscribe` pending, or a connect waiter): backoff
+    ///   reset, and no second attempt is started. If that attempt then fails it
+    ///   is rescheduled on the first step (3–10 s), not a multi-minute one.
+    ///   Without this an advert that lands mid-attempt is consumed and lost.
+    ///   Counted.
+    ///
+    /// Every counted subscription's cooldown stamp is set, whatever the source.
+    /// If at least one queued entry moved, the node's idle cached route is
+    /// dropped ([`Self::evict_route_for_pull`]) so the attempt makes a fresh
+    /// CASE handshake instead of first timing out on a session a rebooted
+    /// device no longer has.
+    ///
+    /// This is chip's `ResetResubscriptionBackoff()` followed by
+    /// `ReadClient::TriggerResubscribeIfScheduled`, which is what Apple's
+    /// `Matter.framework` calls when it sees an operational advert. A forgotten
+    /// node has no entries, so nothing is resurrected. Never fails.
+    fn trigger_resubscribe(&mut self, node_id: u64, source: TriggerSource, now: Instant) -> usize {
+        let honour_cooldown = source == TriggerSource::Advert;
+        let pulled_at = &self.resubscribe_pulled_at;
+        let cooling = |sub_id: SubId| {
+            honour_cooldown
+                && pulled_at
+                    .get(&sub_id)
+                    .is_some_and(|at| now.saturating_duration_since(*at) < ADVERT_PULL_COOLDOWN)
+        };
+        let mut counted: Vec<SubId> = Vec::new();
+        let mut moved_queued = false;
+
+        for pr in &mut self.resubscribes {
+            if pr.node_id != node_id || pr.tx.consumer_gone() || cooling(pr.sub_id) {
+                continue;
+            }
+            if pr.attempt_at <= now {
+                continue;
+            }
+            pr.retry_count = 0;
+            pr.attempt_at = now;
+            moved_queued = true;
+            counted.push(pr.sub_id);
+        }
+        for pending in self.pending.values_mut() {
+            let PendingReply::Subscribe {
+                sub_id,
+                reply: None,
+                node_id: entry_node,
+                report_tx,
+                retry_count,
+                ..
+            } = &mut pending.reply
+            else {
+                continue;
+            };
+            if *entry_node != node_id || report_tx.consumer_gone() || cooling(*sub_id) {
+                continue;
+            }
+            *retry_count = 0;
+            counted.push(*sub_id);
+        }
+        if let Some(waiters) = self.pending_connects.get_mut(&node_id) {
+            for waiter in waiters {
+                let ConnectWaiter::Resubscribe(pr) = waiter else {
+                    continue;
+                };
+                if pr.tx.consumer_gone() || cooling(pr.sub_id) {
+                    continue;
+                }
+                pr.retry_count = 0;
+                counted.push(pr.sub_id);
+            }
+        }
+
+        for sub_id in &counted {
+            self.resubscribe_pulled_at.insert(*sub_id, now);
+        }
+        let evicted_route = moved_queued && self.evict_route_for_pull(node_id);
+        let pulled = counted.len();
+        match source {
+            TriggerSource::Advert if pulled > 0 => tracing::info!(
+                target: "matter_controller::actor",
+                node = format_args!("{node_id:016X}"),
+                pulled,
+                evicted_route,
+                "operational advert seen; resubscribe pulled forward",
+            ),
+            TriggerSource::Advert => tracing::debug!(
+                target: "matter_controller::actor",
+                node = format_args!("{node_id:016X}"),
+                "operational advert seen; nothing to pull (already due, or pulled within the cooldown)",
+            ),
+            TriggerSource::Api => tracing::debug!(
+                target: "matter_controller::actor",
+                node = format_args!("{node_id:016X}"),
+                pulled,
+                evicted_route,
+                "resubscribe_now called; resubscribe pulled forward",
+            ),
+        }
+        pulled
+    }
+
+    /// Remove the cached route `(fabric_id, node_id)` if — and only if — it
+    /// still points at `sid`, leaving the session itself registered. Returns
+    /// whether it removed anything.
+    ///
+    /// Removing only the route sends the node's next operation through a fresh
+    /// connect while anything still in flight on `sid` finishes or times out on
+    /// its own terms. The "still points at `sid`" check stops a late caller from
+    /// evicting a healthy session a sibling already put in its place. The
+    /// orphaned session stays until the session table's idle-first eviction:
+    /// `handle_connect_done` finds no route for it, so it does not remove it.
+    fn evict_cached_route_if(&mut self, fabric_id: u64, node_id: u64, sid: SessionId) -> bool {
+        let key = (fabric_id, node_id);
+        if self.cache.get(&key).is_some_and(|c| c.session_id == sid) {
+            self.cache.remove(&key);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The route eviction a pull performs: drop `node_id`'s cached route unless
+    /// a live subscription rides its session (then the node is demonstrably
+    /// talking to us on it). No sole fabric: nothing to do.
+    fn evict_route_for_pull(&mut self, node_id: u64) -> bool {
+        let Ok(fabric_id) = self.sole_fabric().map(|f| f.fabric_id) else {
+            return false;
+        };
+        let Some(sid) = self.cache.get(&(fabric_id, node_id)).map(|c| c.session_id) else {
+            return false;
+        };
+        if self
+            .subscriptions
+            .values()
+            .any(|entry| entry.session_id == sid)
+        {
+            return false;
+        }
+        self.evict_cached_route_if(fabric_id, node_id, sid)
+    }
+
+    /// Every subscription id currently in a resubscribe episode, live consumer
+    /// or not. The set `resubscribe_pulled_at` must stay within.
+    fn resubscribe_episode_sub_ids(&self) -> std::collections::HashSet<SubId> {
+        self.resubscribe_episode_entries()
+            .map(|(sub_id, _, _)| sub_id)
+            .collect()
+    }
+
+    /// Test audit: every cooldown stamp belongs to a subscription that is still
+    /// in a resubscribe episode, i.e. the map has not leaked.
+    #[cfg(test)]
+    fn assert_pulled_at_within_episodes(&self) {
+        let live = self.resubscribe_episode_sub_ids();
+        for sub_id in self.resubscribe_pulled_at.keys() {
+            assert!(
+                live.contains(sub_id),
+                "resubscribe_pulled_at leaked {sub_id:?}: not in any resubscribe episode"
+            );
+        }
     }
 
     /// One reconcile step for the resubscribe watch, run once per timer drive
@@ -5830,6 +6057,9 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             else {
                 return;
             };
+            // The episode (if this was one) ends here, whatever the response
+            // says: established, or dropped on a parse failure.
+            self.resubscribe_pulled_at.remove(&sub_id);
             match matter_interaction::parse_subscribe_response(&payload) {
                 Ok(resp) => {
                     // Liveness uses the *negotiated* max interval (the device's
@@ -6138,13 +6368,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             // cached a fresh healthy session under this node — dropping that here
             // would force a redundant CASE handshake and churn every subscription
             // just bound to the new session.
-            if self
-                .cache
-                .get(&(fabric_id, p.node_id))
-                .is_some_and(|c| c.session_id == session_id)
-            {
-                self.cache.remove(&(fabric_id, p.node_id));
-            }
+            self.evict_cached_route_if(fabric_id, p.node_id, session_id);
             // M9-G-d: re-send on a cached fresh session if a sibling already
             // reconnected, else reconnect OFF the actor loop (the handshake no
             // longer blocks other sessions) and re-send on completion.
@@ -6290,6 +6514,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             .tx
             .send_control(SubscriptionEvent::Resubscribing { cause })
         {
+            self.resubscribe_pulled_at.remove(&sub_id);
             return;
         }
         let wait = resubscribe_backoff(self.rng.as_ref(), 0);
@@ -6346,6 +6571,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         // subscription again — reap instead of retrying forever (the drop-side
         // cancel is lossy `try_send`, so this is the reliable reap point).
         if pr.tx.report_tx.is_closed() && pr.tx.ctrl_tx.is_closed() {
+            self.resubscribe_pulled_at.remove(&pr.sub_id);
             return;
         }
         let fabric_id = match self.sole_fabric() {
@@ -6382,6 +6608,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         // Same reap guard as `attempt_resubscribe`: a consumer that dropped
         // both receivers can never observe this subscription again.
         if pr.tx.report_tx.is_closed() && pr.tx.ctrl_tx.is_closed() {
+            self.resubscribe_pulled_at.remove(&pr.sub_id);
             return;
         }
         let failed_attempt = pr.retry_count;
@@ -19141,5 +19368,571 @@ mod tests {
         actor.reconcile_resubscribe_watch(Instant::now());
         assert_eq!(state.lock().unwrap().subtype_opens, 2);
         assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+    }
+
+    /// A registered session for route-eviction tests (`sessions.get` must find it).
+    fn register_test_session<D: Discovery>(actor: &mut Actor<InMemoryDatagram, D>) -> SessionId {
+        use matter_crypto::pase::PaseSessionKeys;
+        let keys = PaseSessionKeys {
+            ke: [0u8; 16],
+            i2r_key: [1u8; 16],
+            r2i_key: [2u8; 16],
+            attestation_key: [3u8; 16],
+        };
+        actor.sessions.register_pase(
+            keys,
+            SessionRole::Initiator,
+            1,
+            matter_transport::PeerHint::default(),
+        )
+    }
+
+    /// `(retry_count, attempt_at)` of the queued entry for `sub_id`.
+    fn queued_state<D: Discovery>(
+        actor: &Actor<InMemoryDatagram, D>,
+        sub_id: u64,
+    ) -> (u32, Instant) {
+        let pr = actor
+            .resubscribes
+            .iter()
+            .find(|pr| pr.sub_id == SubId(sub_id))
+            .expect("queued entry");
+        (pr.retry_count, pr.attempt_at)
+    }
+
+    /// Spec test 4 (in flight): the backoff of an attempt already on the wire is
+    /// reset, and nothing else happens — no queued copy, no second request.
+    #[tokio::test]
+    async fn a_pull_resets_an_in_flight_attempt_without_starting_another() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 7, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (SessionId(7), 0x30), pr, far_future());
+        assert_eq!(
+            actor.trigger_resubscribe(0x42, TriggerSource::Advert, Instant::now()),
+            1
+        );
+        match &actor.pending[&(SessionId(7), 0x30)].reply {
+            PendingReply::Subscribe { retry_count, .. } => assert_eq!(*retry_count, 0),
+            _ => panic!("still the same in-flight Subscribe"),
+        }
+        assert_eq!(actor.pending.len(), 1, "no second request");
+        assert!(actor.resubscribes.is_empty(), "no queued copy");
+        assert!(actor.pending_connects.is_empty(), "no connect");
+        actor.assert_pulled_at_within_episodes();
+    }
+
+    /// Spec test 4 (connecting): same for an attempt parked behind a connect —
+    /// and the reset is what makes its failure land on the short step.
+    #[tokio::test]
+    async fn a_pull_resets_a_connecting_attempt_without_starting_another() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 7, Instant::now());
+        actor
+            .pending_connects
+            .insert(0x42, vec![ConnectWaiter::Resubscribe(pr)]);
+        assert_eq!(
+            actor.trigger_resubscribe(0x42, TriggerSource::Advert, Instant::now()),
+            1
+        );
+        let ConnectWaiter::Resubscribe(waiting) = &actor.pending_connects[&0x42][0] else {
+            panic!("still the same waiter");
+        };
+        assert_eq!(waiting.retry_count, 0);
+        assert_eq!(actor.pending_connects[&0x42].len(), 1);
+        assert!(actor.resubscribes.is_empty() && actor.pending.is_empty());
+
+        actor.fail_connect_waiters(0x42, &Error::Operational("unreachable".into()));
+        let (retry, at) = queued_state(&actor, 1);
+        assert_eq!(retry, 1);
+        assert!(
+            at <= Instant::now() + Duration::from_secs(10),
+            "fibonacci(1): 3-10 s"
+        );
+    }
+
+    /// Spec test 5: the cooldown is on the actor, so it survives
+    /// `on_pending_timeout` rebuilding the `PendingResubscribe`.
+    #[tokio::test]
+    async fn the_advert_cooldown_survives_a_failed_attempt() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 5, far_future());
+        actor.resubscribes.push(pr);
+        assert_eq!(
+            actor.trigger_resubscribe(0x42, TriggerSource::Advert, Instant::now()),
+            1
+        );
+
+        let pr = actor.resubscribes.pop().unwrap();
+        seed_inflight_resubscribe(&mut actor, (SessionId(7), 0x40), pr, far_future());
+        actor
+            .on_pending_timeout(SessionId(7), 0x40, PendingTimeoutCause::MrpExpired)
+            .await;
+        assert_eq!(queued_state(&actor, 1).0, 1);
+
+        assert_eq!(
+            actor.trigger_resubscribe(0x42, TriggerSource::Advert, Instant::now()),
+            0,
+            "inside the 30 s cooldown"
+        );
+        assert_eq!(queued_state(&actor, 1).0, 1);
+
+        let stale = Instant::now()
+            .checked_sub(ADVERT_PULL_COOLDOWN + Duration::from_secs(1))
+            .expect("process uptime exceeds the cooldown");
+        actor.resubscribe_pulled_at.insert(SubId(1), stale);
+        assert_eq!(
+            actor.trigger_resubscribe(0x42, TriggerSource::Advert, Instant::now()),
+            1
+        );
+        assert_eq!(queued_state(&actor, 1).0, 0);
+        actor.assert_pulled_at_within_episodes();
+    }
+
+    /// Review focus 3: only eligible subscriptions of the node move, and the
+    /// count says exactly how many. The API then ignores only the cooldown.
+    #[tokio::test]
+    async fn a_pull_counts_only_eligible_subscriptions_of_the_node() {
+        let mut actor = actor_with_one_fabric();
+        let now = Instant::now();
+        let far = far_future();
+        let past = just_past();
+        let (eligible, _eligible_reports, _eligible_ctrl) =
+            test_pending_resubscribe(1, 0x42, 6, far);
+        let (due, _due_reports, _due_ctrl) = test_pending_resubscribe(2, 0x42, 6, past);
+        let (cooling, _cooling_reports, _cooling_ctrl) = test_pending_resubscribe(3, 0x42, 6, far);
+        let (gone, gone_reports, gone_ctrl) = test_pending_resubscribe(4, 0x42, 6, far);
+        drop(gone_reports);
+        drop(gone_ctrl);
+        let (elsewhere, _elsewhere_reports, _elsewhere_ctrl) =
+            test_pending_resubscribe(5, 0x43, 6, far);
+        actor
+            .resubscribes
+            .extend([eligible, due, cooling, gone, elsewhere]);
+        actor.resubscribe_pulled_at.insert(SubId(3), now);
+
+        assert_eq!(
+            actor.trigger_resubscribe(0x42, TriggerSource::Advert, now),
+            1
+        );
+        assert_eq!(queued_state(&actor, 1), (0, now));
+        assert_eq!(
+            queued_state(&actor, 2),
+            (6, past),
+            "already due: not counted"
+        );
+        assert_eq!(queued_state(&actor, 3), (6, far), "cooldown");
+        assert_eq!(queued_state(&actor, 4), (6, far), "consumer gone");
+        assert_eq!(queued_state(&actor, 5), (6, far), "another node");
+
+        assert_eq!(actor.trigger_resubscribe(0x42, TriggerSource::Api, now), 1);
+        assert_eq!(
+            queued_state(&actor, 3),
+            (0, now),
+            "the API ignores the cooldown"
+        );
+        assert_eq!(queued_state(&actor, 4), (6, far), "but not a dead consumer");
+        actor.assert_pulled_at_within_episodes();
+    }
+
+    /// Spec test 7 (evict): a pull that moves a queued entry drops the idle
+    /// cached route, never the session itself.
+    #[tokio::test]
+    async fn a_pull_evicts_an_idle_cached_route_but_never_the_session() {
+        let mut actor = actor_with_one_fabric();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let sid = register_test_session(&mut actor);
+        actor.cache.insert(
+            (fabric_id, 0x42),
+            CachedSession {
+                session_id: sid,
+                peer: "127.0.0.1:5540".parse().unwrap(),
+            },
+        );
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 5, far_future());
+        actor.resubscribes.push(pr);
+        assert_eq!(
+            actor.trigger_resubscribe(0x42, TriggerSource::Api, Instant::now()),
+            1
+        );
+        assert!(
+            !actor.cache.contains_key(&(fabric_id, 0x42)),
+            "route dropped"
+        );
+        assert!(
+            actor.sessions.get(sid).is_some(),
+            "the session is left alone"
+        );
+    }
+
+    /// Spec test 7 (keep): a live subscription on the session means the node
+    /// is talking to us on it — keep the route.
+    #[tokio::test]
+    async fn a_pull_keeps_the_cached_route_while_a_live_subscription_rides_it() {
+        let mut actor = actor_with_one_fabric();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let sid = register_test_session(&mut actor);
+        actor.cache.insert(
+            (fabric_id, 0x42),
+            CachedSession {
+                session_id: sid,
+                peer: "127.0.0.1:5540".parse().unwrap(),
+            },
+        );
+        let (sink, _live_report_rx, _live_ctrl_rx) = test_report_sink();
+        actor.insert_subscription(
+            SubId(9),
+            SubEntry {
+                tx: sink,
+                peer: "127.0.0.1:5540".parse().unwrap(),
+                reassembler: ReportReassembler::default(),
+                session_id: sid,
+                wire_sub_id: 0x99,
+                node_id: 0x42,
+                paths: vec![matter_interaction::ReadPath::all()],
+                event_paths: vec![],
+                event_filters: vec![],
+                min_interval: 1,
+                max_interval: 30,
+                max_interval_ceiling: 30,
+                liveness_deadline: far_future(),
+            },
+        );
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 5, far_future());
+        actor.resubscribes.push(pr);
+        assert_eq!(
+            actor.trigger_resubscribe(0x42, TriggerSource::Api, Instant::now()),
+            1
+        );
+        assert!(actor.cache.contains_key(&(fabric_id, 0x42)), "route kept");
+    }
+
+    /// Spec §4.2: only a pulled QUEUED entry evicts; an in-flight reset alone
+    /// leaves the route.
+    #[tokio::test]
+    async fn an_in_flight_reset_alone_does_not_evict_the_route() {
+        let mut actor = actor_with_one_fabric();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let sid = register_test_session(&mut actor);
+        actor.cache.insert(
+            (fabric_id, 0x42),
+            CachedSession {
+                session_id: sid,
+                peer: "127.0.0.1:5540".parse().unwrap(),
+            },
+        );
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 5, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (sid, 0x31), pr, far_future());
+        assert_eq!(
+            actor.trigger_resubscribe(0x42, TriggerSource::Api, Instant::now()),
+            1
+        );
+        assert!(actor.cache.contains_key(&(fabric_id, 0x42)));
+    }
+
+    /// Review focus 5 / spec §6: without a sole fabric the pull still resets
+    /// and pulls; route eviction is skipped.
+    #[tokio::test]
+    async fn a_pull_without_a_sole_fabric_still_resets_and_skips_eviction() {
+        let (io, _peer) = InMemoryDatagram::pair();
+        let mut actor = Actor::new(
+            io,
+            NullDiscovery,
+            Arc::new(MemStore::default()),
+            Arc::new(SystemNocRng),
+            ControllerState { fabrics: vec![] },
+            None,
+            crate::builder::DEFAULT_ADMIN_VENDOR_ID,
+        );
+        actor.cache.insert(
+            (1, 0x42),
+            CachedSession {
+                session_id: SessionId(7),
+                peer: "127.0.0.1:5540".parse().unwrap(),
+            },
+        );
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 5, far_future());
+        actor.resubscribes.push(pr);
+        let now = Instant::now();
+        assert_eq!(actor.trigger_resubscribe(0x42, TriggerSource::Api, now), 1);
+        assert_eq!(queued_state(&actor, 1), (0, now));
+        assert!(
+            actor.cache.contains_key(&(1, 0x42)),
+            "no eviction without a fabric"
+        );
+    }
+
+    /// The cooldown map is pruned when the episode is established.
+    #[tokio::test]
+    async fn pulled_at_is_pruned_when_the_episode_is_established() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 2, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (SessionId(7), 0x60), pr, far_future());
+        actor.resubscribe_pulled_at.insert(SubId(1), Instant::now());
+        actor
+            .resolve_subscribe(
+                SessionId(7),
+                0x60,
+                OP_SUBSCRIBE_RESPONSE,
+                build_subscribe_response(0x56, 30),
+            )
+            .await;
+        assert!(!actor.resubscribe_pulled_at.contains_key(&SubId(1)));
+        actor.assert_pulled_at_within_episodes();
+    }
+
+    /// … when the subscription is cancelled.
+    #[tokio::test]
+    async fn pulled_at_is_pruned_when_the_subscription_is_cancelled() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 2, far_future());
+        actor.resubscribes.push(pr);
+        actor.resubscribe_pulled_at.insert(SubId(1), Instant::now());
+        actor
+            .dispatch_ready(Command::CancelSubscription { key: SubId(1) })
+            .await;
+        assert!(actor.resubscribe_pulled_at.is_empty());
+    }
+
+    /// … when the node is forgotten (queued, in flight and connecting alike).
+    #[tokio::test]
+    async fn pulled_at_is_pruned_when_the_node_is_forgotten() {
+        let mut actor = actor_with_one_fabric();
+        let (queued, _queued_reports, _queued_ctrl) =
+            test_pending_resubscribe(1, 0x42, 2, far_future());
+        let (in_flight, _in_flight_reports, _in_flight_ctrl) =
+            test_pending_resubscribe(2, 0x42, 2, Instant::now());
+        let (connecting, _connecting_reports, _connecting_ctrl) =
+            test_pending_resubscribe(3, 0x42, 2, Instant::now());
+        let (other, _other_reports, _other_ctrl) =
+            test_pending_resubscribe(4, 0x43, 2, far_future());
+        actor.resubscribes.extend([queued, other]);
+        seed_inflight_resubscribe(&mut actor, (SessionId(7), 0x61), in_flight, far_future());
+        actor
+            .pending_connects
+            .insert(0x42, vec![ConnectWaiter::Resubscribe(connecting)]);
+        for id in 1..=4 {
+            actor
+                .resubscribe_pulled_at
+                .insert(SubId(id), Instant::now());
+        }
+        let (reply, rx) = oneshot::channel();
+        actor
+            .dispatch_ready(Command::ForgetNode {
+                node_id: 0x42,
+                reply,
+            })
+            .await;
+        let _ = rx.await.unwrap();
+        assert_eq!(
+            actor
+                .resubscribe_pulled_at
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![SubId(4)],
+            "only the other node's stamp survives"
+        );
+        actor.assert_pulled_at_within_episodes();
+    }
+
+    /// … when a due entry is reaped (consumer gone) by `attempt_resubscribe`.
+    #[tokio::test]
+    async fn pulled_at_is_pruned_when_a_due_entry_is_reaped() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, reports, ctrl) = test_pending_resubscribe(1, 0x42, 2, just_past());
+        drop(reports);
+        drop(ctrl);
+        actor.resubscribes.push(pr);
+        actor.resubscribe_pulled_at.insert(SubId(1), Instant::now());
+        actor.drive_resubscribes().await;
+        assert!(actor.resubscribe_pulled_at.is_empty());
+    }
+
+    /// … when a failed attempt is reaped by `reschedule_resubscribe`.
+    #[tokio::test]
+    async fn pulled_at_is_pruned_when_a_failed_entry_is_reaped() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, reports, ctrl) = test_pending_resubscribe(1, 0x42, 2, Instant::now());
+        drop(reports);
+        drop(ctrl);
+        seed_inflight_resubscribe(&mut actor, (SessionId(7), 0x62), pr, far_future());
+        actor.resubscribe_pulled_at.insert(SubId(1), Instant::now());
+        actor
+            .on_pending_timeout(SessionId(7), 0x62, PendingTimeoutCause::MrpExpired)
+            .await;
+        assert!(actor.resubscribe_pulled_at.is_empty());
+    }
+
+    /// … when `begin_resubscribe` reaps (the control receiver is gone).
+    #[test]
+    fn pulled_at_is_pruned_when_begin_resubscribe_reaps() {
+        let mut actor = actor_with_one_fabric();
+        let (sink, _report_rx, ctrl_rx) = test_report_sink();
+        drop(ctrl_rx);
+        actor.insert_subscription(
+            SubId(1),
+            SubEntry {
+                tx: sink,
+                peer: "127.0.0.1:5540".parse().unwrap(),
+                reassembler: ReportReassembler::default(),
+                session_id: SessionId(7),
+                wire_sub_id: 0x77,
+                node_id: 0x42,
+                paths: vec![matter_interaction::ReadPath::all()],
+                event_paths: vec![],
+                event_filters: vec![],
+                min_interval: 1,
+                max_interval: 30,
+                max_interval_ceiling: 30,
+                liveness_deadline: Instant::now(),
+            },
+        );
+        actor.resubscribe_pulled_at.insert(SubId(1), Instant::now());
+        actor.begin_resubscribe(SubId(1), Error::Operational("liveness".into()));
+        assert!(actor.resubscribe_pulled_at.is_empty());
+    }
+
+    /// The audit helper itself must be able to fail.
+    #[test]
+    #[should_panic(expected = "leaked")]
+    fn the_pulled_at_audit_catches_a_leak() {
+        let mut actor = actor_with_one_fabric();
+        actor.resubscribe_pulled_at.insert(SubId(1), Instant::now());
+        actor.assert_pulled_at_within_episodes();
+    }
+
+    /// Spec test 13 (count, cooldown ignored, dead consumers excluded,
+    /// routed as a local verb that starts no connect).
+    #[tokio::test]
+    async fn resubscribe_now_reports_how_many_subscriptions_it_moved() {
+        let mut actor = actor_with_one_fabric();
+        let (queued, _queued_reports, _queued_ctrl) =
+            test_pending_resubscribe(1, 0x42, 5, far_future());
+        let (in_flight, _in_flight_reports, _in_flight_ctrl) =
+            test_pending_resubscribe(2, 0x42, 5, Instant::now());
+        let (other, _other_reports, _other_ctrl) =
+            test_pending_resubscribe(3, 0x43, 5, far_future());
+        let (gone, gone_reports, gone_ctrl) = test_pending_resubscribe(4, 0x42, 5, far_future());
+        drop(gone_reports);
+        drop(gone_ctrl);
+        actor.resubscribes.extend([queued, other, gone]);
+        seed_inflight_resubscribe(&mut actor, (SessionId(7), 0x50), in_flight, far_future());
+        actor.resubscribe_pulled_at.insert(SubId(1), Instant::now());
+
+        let (probe, _probe_rx) = oneshot::channel();
+        assert_eq!(
+            command_target_node(&Command::ResubscribeNow {
+                node_id: 0x42,
+                reply: probe
+            }),
+            None,
+            "a local verb: never parked behind a connect"
+        );
+        let (reply, rx) = oneshot::channel();
+        actor
+            .dispatch(Command::ResubscribeNow {
+                node_id: 0x42,
+                reply,
+            })
+            .await;
+        assert_eq!(rx.await.unwrap(), 2);
+        assert!(actor.pending_connects.is_empty());
+    }
+
+    /// Spec test 13: `Ok(0)` for a subscribed node, an unknown node, and a
+    /// commissioned node with no subscriptions.
+    #[tokio::test]
+    async fn resubscribe_now_is_zero_when_nothing_waits() {
+        let mut actor = actor_with_one_fabric();
+        let (sink, _report_rx, _ctrl_rx) = test_report_sink();
+        actor.insert_subscription(
+            SubId(1),
+            SubEntry {
+                tx: sink,
+                peer: "127.0.0.1:5540".parse().unwrap(),
+                reassembler: ReportReassembler::default(),
+                session_id: SessionId(7),
+                wire_sub_id: 0x10,
+                node_id: 0x42,
+                paths: vec![matter_interaction::ReadPath::all()],
+                event_paths: vec![],
+                event_filters: vec![],
+                min_interval: 1,
+                max_interval: 30,
+                max_interval_ceiling: 30,
+                liveness_deadline: far_future(),
+            },
+        );
+        actor.state.fabrics[0]
+            .devices
+            .push(crate::state::DeviceEntry {
+                node_id: 0x44,
+                peer_noc_public_key: [0u8; 65],
+                resumption_record: None,
+                last_known_addr: None,
+                vendor_id: None,
+                product_id: None,
+                label: None,
+            });
+        for node_id in [0x42, 0x99, 0x44] {
+            let (reply, rx) = oneshot::channel();
+            actor
+                .dispatch(Command::ResubscribeNow { node_id, reply })
+                .await;
+            assert_eq!(rx.await.unwrap(), 0, "node {node_id:#x}");
+        }
+    }
+
+    /// Spec test 13: the public method, on a live controller.
+    #[tokio::test]
+    async fn resubscribe_now_on_a_live_controller_with_nothing_waiting_is_zero() {
+        let (io, peer) = InMemoryDatagram::pair();
+        keep_endpoint_open(peer);
+        let controller = crate::controller::MatterController::with_components(
+            Arc::new(MemStore::default()),
+            io,
+            NullDiscovery,
+            Arc::new(SystemNocRng),
+            None,
+            crate::builder::DEFAULT_ADMIN_VENDOR_ID,
+        )
+        .expect("open");
+        let n = tokio::time::timeout(Duration::from_secs(5), controller.resubscribe_now(0x42))
+            .await
+            .expect("must not hang")
+            .expect("controller alive");
+        assert_eq!(n, 0);
+    }
+
+    /// Spec test 13: `ControllerStopped` once the actor has shut down.
+    #[tokio::test]
+    async fn resubscribe_now_is_controller_stopped_after_shutdown() {
+        let (io, peer) = InMemoryDatagram::pair();
+        drop(peer); // every recv_from now fails terminally, so the actor stops
+        let controller = crate::controller::MatterController::with_components(
+            Arc::new(MemStore::default()),
+            io,
+            NullDiscovery,
+            Arc::new(SystemNocRng),
+            None,
+            crate::builder::DEFAULT_ADMIN_VENDOR_ID,
+        )
+        .expect("open");
+        let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    controller.resubscribe_now(0x42).await,
+                    Err(Error::ControllerStopped)
+                ) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            stopped.is_ok(),
+            "resubscribe_now must report ControllerStopped"
+        );
     }
 }
