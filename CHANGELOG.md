@@ -22,6 +22,91 @@ From `0.1.0` onward the headings mean what they say, and
 while a crate is `0.x`, a **breaking change bumps the minor version** — these
 APIs have had no outside users yet and are expected to move.
 
+## matter-transport 0.7.2 + matter-controller 0.16.0
+
+A subscription whose device dropped off the network now comes back as soon as
+the device re-announces itself, instead of waiting out its retry backoff.
+Reported from the field by WeaveHome (phunapps/weavehome#1161): a Tapo H100
+bridge unplugged for about 6.5 minutes was back on the network within a minute
+of power returning, but its subscription was not re-established for another
+9 minutes. By then the retry backoff (chip's `ComputeTimeTillNextSubscription`,
+which we follow) had grown to minutes, and nothing shortened it.
+
+`matter-transport` is a patch release: one new `Discovery` method with a default
+implementation, so no implementor breaks. `matter-controller` takes a minor bump
+for its new public method and now requires `matter-transport` 0.7.2.
+`matter-commissioning`'s `0.7.0` requirement already accepts 0.7.2, so it is not
+re-released. No wire change.
+
+### matter-transport: Added — `Discovery::poll_found`
+
+`Discovery::poll_found(handle)` returns the instance names for which a browse
+saw a **new PTR record** since the last call: an instance appearing, or
+re-appearing after its record expired. Each name is returned once, is never
+replayed to a handle attached later, and says nothing about whether the
+instance has resolved. The default implementation returns nothing.
+
+`MdnsSdDiscovery` implements it from mdns-sd's `ServiceFound` events. Found
+events are buffered per handle (at most 256, oldest dropped), and `poll_results`
+and `poll_found` share one drain of the browse, so the order of the two calls
+does not matter.
+
+### matter-controller: Added — resubscribe on operational advert
+
+While a subscription is waiting to be re-established, the controller keeps its
+fabric's operational subtype browse (`_I<fabric>._sub._matter._tcp`) open. When
+the device publishes a new PTR record there, every waiting subscription of that
+node is pulled forward: a scheduled retry fires immediately with its backoff
+reset, and a retry already in progress keeps running with its backoff reset, so
+if it fails the next try is seconds away, not minutes.
+
+This follows Apple's `Matter.framework` (`MTROperationalBrowser` →
+`nodeMayBeAdvertisingOperational`), which calls chip's
+`ResetResubscriptionBackoff()` and `ReadClient::TriggerResubscribeIfScheduled`.
+Resetting the backoff, rather than continuing from it, is deliberate: a device
+that has just come back is often still booting, and continuing the sequence
+would put it back on a multi-minute step after one failed try. Spurious resets
+are bounded. Only a new PTR on the fabric subtype counts (not a refreshed or
+re-resolved record), found events in the first 5 s after the browse opens are
+discarded (the mDNS daemon's cache flush), and an advert pulls a given
+subscription at most once per 30 s.
+
+When a pull moves a scheduled retry, the node's cached route is dropped if no
+live subscription is using it, so the retry makes a fresh CASE handshake
+instead of first timing out on a session a rebooted device no longer has. The
+session itself is left alone.
+
+**`MatterController::resubscribe_now(node_id)`** does the same on demand, for
+applications with their own reachability signal (their own mDNS, an ICD
+check-in, a router event). It is not throttled, never starts a second attempt,
+and returns how many subscriptions it affected (`Ok(0)` when nothing of that
+node was waiting).
+
+Known limitations:
+
+- An outage shorter than the device's PTR TTL leaves the PTR cached, so its
+  return produces no new PTR and recovery follows the backoff, as before. That
+  is 120 s on chip-based devices, but up to 75 minutes on stacks that use the
+  RFC 6762 default. A graceful reboot sends a goodbye and is detected regardless.
+- Thread devices behind a border router whose SRP advertising proxy kept serving
+  their records while they were offline produce no new PTR, so no advert is
+  seen. Call `resubscribe_now` from a better signal.
+- A device that comes back within 5 s of the browse opening has its advert
+  discarded with the cache flush; recovery follows the backoff.
+- A custom `Discovery` (`MatterControllerBuilder::discovery`) gets advert
+  recovery only if it overrides **both** `query_operational_fabric` and
+  `poll_found`. Otherwise call `resubscribe_now` from your own signal. The
+  default `MdnsSdDiscovery` does both.
+
+### matter-controller: Changed — failed resubscribe attempts are logged
+
+Every failed resubscribe attempt now logs at `debug` (target
+`matter_controller::actor`): the node, the subscription, which attempt failed,
+the cause (the connect or send error, the missing fabric, or which timeout
+fired: MRP exhaustion or the response deadline), and the wait until the next
+one. Before this, failed attempts were silent. An advert-triggered pull logs at
+`info`.
+
 ## matter-interaction 0.4.2
 
 Additive API only, contributed by @qwandor in #134. No behaviour or wire change.
