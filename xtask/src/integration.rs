@@ -619,7 +619,9 @@ fn run_tests(
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
 
     let mut cmd = Command::new(cargo);
-    cmd.args(["test", "-p", "integration-tests"]);
+    // `--no-fail-fast`: a sweep should report every failing test binary, not
+    // stop at the first one — one nightly run then shows the whole picture.
+    cmd.args(["test", "-p", "integration-tests", "--no-fail-fast"]);
     // Minimal DUTs run only their own test binary (so they don't execute the
     // all-clusters cluster tests against an app that lacks those clusters).
     if let Some(test) = spec.test_filter {
