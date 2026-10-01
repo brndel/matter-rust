@@ -301,6 +301,39 @@ pub trait Discovery {
     /// Non-blocking. Returns an empty vec if no new services have
     /// arrived. Repeat calls accumulate freshly-resolved services.
     fn poll_results(&mut self, handle: QueryHandle) -> Vec<MatterService>;
+
+    /// Instance names (left-most label, the same form as
+    /// [`MatterService::instance_name`]) for which this browse saw a **new**
+    /// PTR record since the last call: an instance appearing, or re-appearing
+    /// after its record expired. Event semantics: each name is returned once,
+    /// is never replayed to a handle attached later, and says nothing about
+    /// whether the instance has resolved yet. The default returns nothing; a
+    /// `Discovery` that cannot observe PTR additions keeps it.
+    ///
+    /// # What it is for
+    ///
+    /// A controller waiting to re-establish a subscription to a node that went
+    /// offline uses this as its "the node is back" signal; Apple's
+    /// `Matter.framework` reacts to the same PTR add. It is deliberately not
+    /// [`Self::poll_results`]: a resolved record is also re-delivered when
+    /// nothing about the device changed (for example after another browse that
+    /// named the same instances stops and the daemon re-resolves them), while a
+    /// new PTR means the instance itself (re)appeared.
+    ///
+    /// Non-blocking, like [`Self::poll_results`]. An unknown or stopped handle
+    /// returns an empty `Vec`.
+    ///
+    /// # Default implementation
+    ///
+    /// Returns an empty `Vec` for every handle. A caller reads that as "no
+    /// adverts observed", which is always safe: it falls back to whatever it did
+    /// without them.
+    fn poll_found(&mut self, handle: QueryHandle) -> Vec<String> {
+        // Unused on purpose: an implementation that cannot observe PTR
+        // additions has nothing to report for any handle.
+        let _ = handle;
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -388,6 +421,36 @@ mod tests {
             d.queried,
             vec![ServiceKind::Operational],
             "the default must open a plain operational browse",
+        );
+    }
+
+    /// T6: `poll_found` is additive — an implementation written before it
+    /// existed keeps compiling and reports no found events for any handle.
+    #[test]
+    fn default_poll_found_reports_nothing() {
+        struct PreFoundDiscovery;
+        impl Discovery for PreFoundDiscovery {
+            fn publish(&mut self, _s: &MatterService) -> Result<()> {
+                Ok(())
+            }
+            fn unpublish(&mut self, _n: &str, _k: ServiceKind) -> Result<()> {
+                Ok(())
+            }
+            fn query(&mut self, _k: ServiceKind) -> Result<QueryHandle> {
+                Ok(QueryHandle(3))
+            }
+            fn stop_query(&mut self, _h: QueryHandle) {}
+            fn poll_results(&mut self, _h: QueryHandle) -> Vec<MatterService> {
+                Vec::new()
+            }
+        }
+
+        let mut d = PreFoundDiscovery;
+        let h = d.query(ServiceKind::Operational).unwrap();
+        assert!(d.poll_found(h).is_empty());
+        assert!(
+            d.poll_found(QueryHandle(999)).is_empty(),
+            "unknown handle too"
         );
     }
 

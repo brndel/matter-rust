@@ -49,12 +49,31 @@
 //! reaching the wanted node (issue #113).
 //!
 //! One caveat if you hold the two browses on different lifetimes:
-//! `stop_browse(<subtype>)` drops the daemon's PTR entries for that subtype
-//! *and* the SRV/TXT records of the instances they named — records a surviving
-//! base-type browse would otherwise still have cached, and would have to
-//! re-query for. Callers in this workspace open and release both together, so
-//! they never pay that; this adapter's own `surfaced` replay cache is per
-//! browse and is unaffected either way.
+//! `stop_browse(<type>)` drops the daemon's PTR entries for that type *and* the
+//! SRV/TXT records of the instances they named — records a surviving browse of
+//! the other string still needs, and must re-query for. The controller does
+//! hold them on different lifetimes: while a subscription is waiting to be
+//! re-established it keeps the fabric-subtype browse open alone, and opens the
+//! base type only as a short-lived resolve fallback. When that base browse
+//! stops, the surviving subtype browse re-resolves the wiped instances and
+//! emits fresh `ServiceResolved` events for records that did not change. That
+//! is harmless to [`Discovery::poll_results`] callers (a re-delivered record is
+//! still a record), and it is why the controller's "device is back" signal is
+//! [`Discovery::poll_found`] — a **new PTR** — and not a resolved record: the
+//! subtype's own PTR entries survive a base-type stop, so the re-resolution
+//! never produces a `ServiceFound`. This adapter's own `surfaced` replay cache
+//! is per browse and is unaffected either way.
+//!
+//! # Found events
+//!
+//! [`Discovery::poll_found`] reports mdns-sd's `ServiceFound`, which the daemon
+//! emits only when a **new** PTR record enters its cache: an instance
+//! appearing, or re-appearing after its record expired. Each event is buffered
+//! per handle as an instance name, fanned out to every handle of the browse
+//! like a record, never replayed to a handle attached later, and capped at 256
+//! names per handle (oldest dropped). `poll_results` and `poll_found` share one
+//! drain of the browse, so the order in which a caller makes the two calls does
+//! not matter.
 //!
 //! # Diagnostics
 //!
@@ -97,6 +116,16 @@ use crate::error::{Error, Result};
 /// up on its own (`RUST_LOG=matter_transport::mdns=trace`) without enabling
 /// every other target in the process.
 const LOG_TARGET: &str = "matter_transport::mdns";
+
+/// How many found-event names one handle buffers before the oldest is dropped.
+///
+/// [`Discovery::poll_found`] is an event stream, and a handle whose owner never
+/// calls it (the controller's base-type handle is one) would otherwise
+/// accumulate a name per new PTR for as long as it lives. 256 is far above any
+/// realistic burst between two polls of a handle that IS polled, so the cap
+/// only ever bites the unpolled ones, and there it costs bounded memory and a
+/// `trace` line per drop.
+const FOUND_BUFFER_CAP: usize = 256;
 
 impl From<mdns_sd::Error> for Error {
     fn from(e: mdns_sd::Error) -> Self {
@@ -144,6 +173,21 @@ struct BrowseState {
     /// re-announces: the replay handed to a new handle is bounded by the size
     /// of the network, not by how long the browse has been open.
     surfaced: HashMap<String, MatterService>,
+    /// Handles attached to this browse, each with the instance names of the
+    /// `ServiceFound` events (a NEW PTR record) since that handle last called
+    /// [`Discovery::poll_found`].
+    ///
+    /// Inserted and removed together with `pending`, but deliberately NOT
+    /// seeded on attach: a found event is an event, not state, so a handle
+    /// attached after it never sees it. Each buffer is capped at
+    /// [`FOUND_BUFFER_CAP`], oldest dropped.
+    found: HashMap<QueryHandle, Vec<String>>,
+    /// Test-only queue of events "sent by the daemon" but not yet drained, so a
+    /// test can check that `poll_results` and `poll_found` share one drain. The
+    /// real `Receiver`'s sender lives inside the daemon and cannot be written
+    /// to from a test.
+    #[cfg(test)]
+    injected: Vec<ServiceEvent>,
 }
 
 /// Default mDNS discovery adapter for Matter, backed by `mdns-sd`.
@@ -286,6 +330,9 @@ impl MdnsSdDiscovery {
                     receiver,
                     pending: HashMap::new(),
                     surfaced: HashMap::new(),
+                    found: HashMap::new(),
+                    #[cfg(test)]
+                    injected: Vec::new(),
                 },
             );
         }
@@ -305,6 +352,8 @@ impl MdnsSdDiscovery {
         let replayed: Vec<MatterService> = browse.surfaced.values().cloned().collect();
         let replayed_count = replayed.len();
         browse.pending.insert(handle, replayed);
+        // No replay for found events: a new handle starts with an empty buffer.
+        browse.found.insert(handle, Vec::new());
         let handles = browse.pending.len();
         tracing::debug!(
             target: LOG_TARGET,
@@ -345,8 +394,50 @@ impl MdnsSdDiscovery {
                 service_type,
                 &mut browse.pending,
                 &mut browse.surfaced,
+                &mut browse.found,
                 event,
             );
+        }
+    }
+
+    /// Test seam: queue `event` on the `service_type` browse as if the daemon
+    /// had sent it, WITHOUT fanning it out. Unlike
+    /// [`Self::deliver_for_type_for_test`], the event waits for the next drain,
+    /// so a test can check that `poll_results` and `poll_found` share one drain.
+    /// No-op when no browse is open for `service_type`.
+    #[cfg(test)]
+    fn queue_for_test(&mut self, service_type: &str, event: ServiceEvent) {
+        if let Some(browse) = self.browses.get_mut(service_type) {
+            browse.injected.push(event);
+        }
+    }
+
+    /// Drain every event the daemon has queued for `service_type`'s browse and
+    /// fan each out to every attached handle: resolved records into `pending`
+    /// (and `surfaced`), found events into `found`.
+    ///
+    /// Both [`Discovery::poll_results`] and [`Discovery::poll_found`] call this
+    /// first. Whichever runs first drains for both, so the order of the two
+    /// calls never matters and neither can starve the other of events.
+    fn drain_events(&mut self, service_type: &str) {
+        let Some(browse) = self.browses.get_mut(service_type) else {
+            return;
+        };
+        #[cfg(test)]
+        let injected = std::mem::take(&mut browse.injected);
+        let BrowseState {
+            receiver,
+            pending,
+            surfaced,
+            found,
+            ..
+        } = browse;
+        while let Ok(event) = receiver.try_recv() {
+            fan_out_event(service_type, pending, surfaced, found, event);
+        }
+        #[cfg(test)]
+        for event in injected {
+            fan_out_event(service_type, pending, surfaced, found, event);
         }
     }
 }
@@ -447,6 +538,7 @@ impl Discovery for MdnsSdDiscovery {
         let remaining = match self.browses.get_mut(&service_type) {
             Some(browse) => {
                 browse.pending.remove(&handle);
+                browse.found.remove(&handle);
                 browse.pending.len()
             }
             None => 0,
@@ -487,28 +579,35 @@ impl Discovery for MdnsSdDiscovery {
         let Some(service_type) = self.handle_types.get(&handle).cloned() else {
             return Vec::new();
         };
-        let Some(browse) = self.browses.get_mut(&service_type) else {
+        self.drain_events(&service_type);
+        // `handle_types` and `pending` are inserted and removed together, so a
+        // missing buffer is unreachable; empty is the safe answer either way.
+        self.browses
+            .get_mut(&service_type)
+            .and_then(|browse| browse.pending.get_mut(&handle))
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// Drain the shared browse once and return **this** handle's found events:
+    /// the instance names mdns-sd reported as `ServiceFound` (a new PTR record
+    /// entering its cache) since this handle's last call.
+    ///
+    /// Shares one drain with [`Discovery::poll_results`], so the order of the
+    /// two calls never matters. A handle attached after a `ServiceFound` does
+    /// not receive it (found events are not replayed, unlike resolved records).
+    /// Each handle buffers at most `FOUND_BUFFER_CAP` (256) names, oldest
+    /// dropped, so a handle whose owner never calls this costs bounded memory.
+    fn poll_found(&mut self, handle: QueryHandle) -> Vec<String> {
+        let Some(service_type) = self.handle_types.get(&handle).cloned() else {
             return Vec::new();
         };
-        // Destructure so the receiver and the per-handle buffers are borrowed
-        // as the disjoint fields they are.
-        let BrowseState {
-            receiver,
-            pending,
-            surfaced,
-        } = browse;
-        // Drain pending events without blocking, fanning each out to every
-        // handle attached to this browse — including handles that are not the
-        // one polling, which is the whole point (issue #113).
-        while let Ok(event) = receiver.try_recv() {
-            fan_out_event(&service_type, pending, surfaced, event);
-        }
-        match pending.get_mut(&handle) {
-            Some(buffer) => std::mem::take(buffer),
-            // Unreachable: `handle_types` and `pending` are inserted and
-            // removed together. Empty is the safe answer either way.
-            None => Vec::new(),
-        }
+        self.drain_events(&service_type);
+        self.browses
+            .get_mut(&service_type)
+            .and_then(|browse| browse.found.get_mut(&handle))
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 }
 
@@ -523,13 +622,18 @@ impl Discovery for MdnsSdDiscovery {
 ///
 /// `browse` is the exact string this browse was opened with, logged with every
 /// surfaced record so a trace shows **which** browse produced it — base type or
-/// compressed-fabric subtype (issue #113).
+/// compressed-fabric subtype (issue #113). A `ServiceFound` is also appended,
+/// as an instance name, to every handle's found buffer ([`buffer_found`]).
 fn fan_out_event(
     browse: &str,
     pending: &mut HashMap<QueryHandle, Vec<MatterService>>,
     surfaced: &mut HashMap<String, MatterService>,
+    found: &mut HashMap<QueryHandle, Vec<String>>,
     event: ServiceEvent,
 ) {
+    if let ServiceEvent::ServiceFound(_, fullname) = &event {
+        buffer_found(browse, found, fullname);
+    }
     match event {
         ServiceEvent::ServiceResolved(info) => {
             // `service_info_to_matter` logs its own drop reason, so a
@@ -556,12 +660,48 @@ fn fan_out_event(
             }
         }
         // Other events (ServiceFound, ServiceRemoved, SearchStarted,
-        // SearchStopped, etc.) are intentionally discarded — poll_results only
-        // emits usable (address-resolved) services. Traced rather than dropped
-        // silently: a `ServiceFound` never followed by a `ServiceResolved` for
-        // the same instance is the signature of the resolver failing to
-        // complete SRV/address resolution, and is otherwise invisible.
+        // SearchStopped, etc.) produce no record — poll_results only emits
+        // usable (address-resolved) services. ServiceFound was buffered above
+        // for poll_found; every one of them is still traced, because a
+        // `ServiceFound` never followed by a `ServiceResolved` for the same
+        // instance is the signature of the resolver failing to complete
+        // SRV/address resolution, and is otherwise invisible.
         other => trace_unused_event(&other),
+    }
+}
+
+/// Append the instance named by a `ServiceFound` fullname to every attached
+/// handle's found buffer, dropping a buffer's oldest name first once it holds
+/// [`FOUND_BUFFER_CAP`].
+///
+/// mdns-sd reports the PTR's alias, `<instance>.<service-type>.local.`; for a
+/// subtype browse that is the base-type instance fullname, so the same
+/// [`instance_name_from_fullname`] split applies to both kinds of browse. A
+/// fullname with no instance label is dropped (logged at `debug`), never
+/// buffered as an empty name.
+fn buffer_found(browse: &str, found: &mut HashMap<QueryHandle, Vec<String>>, fullname: &str) {
+    let Some(instance) = instance_name_from_fullname(fullname) else {
+        tracing::debug!(
+            target: LOG_TARGET,
+            browse,
+            fullname = %fullname,
+            "mDNS ServiceFound ignored: malformed fullname (no leading instance label)",
+        );
+        return;
+    };
+    for (handle, buffer) in found {
+        if buffer.len() >= FOUND_BUFFER_CAP {
+            let dropped = buffer.remove(0);
+            tracing::trace!(
+                target: LOG_TARGET,
+                browse,
+                handle = handle.0,
+                dropped = %dropped,
+                cap = FOUND_BUFFER_CAP,
+                "mDNS found-event buffer full; dropped the oldest",
+            );
+        }
+        buffer.push(instance.clone());
     }
 }
 
@@ -1367,5 +1507,166 @@ mod tests {
             .unwrap();
 
         assert!(found, "did not discover self-published service within 5s");
+    }
+
+    // ---------------------------------------------------------------------
+    // Found events (`poll_found`): a NEW PTR record, mdns-sd `ServiceFound`.
+    // ---------------------------------------------------------------------
+
+    /// A `ServiceFound` event exactly as mdns-sd emits it: `(ty_domain, fullname)`.
+    fn found_event(service_type: &str, fullname: &str) -> ServiceEvent {
+        ServiceEvent::ServiceFound(service_type.to_string(), fullname.to_string())
+    }
+
+    /// Whether a `poll_found` result names `instance`. Used instead of
+    /// comparing whole vectors: a developer machine may have real Matter nodes
+    /// announcing on the network, and their found events land here too.
+    fn names(found: &[String], instance: &str) -> bool {
+        found.iter().any(|n| n == instance)
+    }
+
+    /// T1: a found event is fanned out to every handle of the browse, and each
+    /// handle gets it exactly once.
+    #[test]
+    fn a_found_event_reaches_every_attached_handle_once() {
+        let ty = ServiceKind::Operational.service_type();
+        let mut d = MdnsSdDiscovery::new().unwrap();
+        let a = d.query(ServiceKind::Operational).unwrap();
+        let b = d.query(ServiceKind::Operational).unwrap();
+        d.deliver_for_test(
+            ServiceKind::Operational,
+            found_event(ty, "t1-found._matter._tcp.local."),
+        );
+        assert!(names(&d.poll_found(a), "t1-found"));
+        assert!(
+            names(&d.poll_found(b), "t1-found"),
+            "one handle's poll must not consume another handle's copy",
+        );
+        assert!(!names(&d.poll_found(a), "t1-found"), "returned once");
+        assert!(!names(&d.poll_found(b), "t1-found"), "returned once");
+        d.stop_query(a);
+        // A stopped handle is inert: its buffer went with it.
+        assert!(d.poll_found(a).is_empty());
+        d.stop_query(b);
+    }
+
+    /// T2: found events are events, not state — a handle attached after one
+    /// does not get it — while the same late handle still gets the `surfaced`
+    /// replay of resolved records.
+    #[test]
+    fn found_events_are_not_replayed_to_a_handle_attached_later() {
+        let ty = ServiceKind::Operational.service_type();
+        let mut d = MdnsSdDiscovery::new().unwrap();
+        let early = d.query(ServiceKind::Operational).unwrap();
+        d.deliver_for_test(
+            ServiceKind::Operational,
+            resolved_event("t2-node", ServiceKind::Operational),
+        );
+        d.deliver_for_test(
+            ServiceKind::Operational,
+            found_event(ty, "t2-node._matter._tcp.local."),
+        );
+        let late = d.query(ServiceKind::Operational).unwrap();
+        assert!(
+            !names(&d.poll_found(late), "t2-node"),
+            "a found event must never be replayed to a later handle",
+        );
+        assert!(
+            contains(&d.poll_results(late), "t2-node"),
+            "the resolved record IS replayed from `surfaced`",
+        );
+        assert!(names(&d.poll_found(early), "t2-node"));
+        d.stop_query(early);
+        d.stop_query(late);
+    }
+
+    /// T3: on a subtype browse mdns-sd reports the PTR's alias, which is the
+    /// BASE-type instance fullname (mdns-sd 0.21.3 `service_daemon.rs`
+    /// L3087-3104); the instance label is everything before the first dot. A
+    /// fullname with no instance label is ignored, not surfaced as "".
+    #[test]
+    fn a_subtype_found_event_yields_the_base_type_instance_label() {
+        let mut d = MdnsSdDiscovery::new().unwrap();
+        let h = d.query_operational_fabric(TEST_CFID).unwrap();
+        d.deliver_for_type_for_test(
+            TEST_SUBTYPE,
+            found_event(
+                TEST_SUBTYPE,
+                "F52AC107C954E38E-0000000000000042._matter._tcp.local.",
+            ),
+        );
+        d.deliver_for_type_for_test(TEST_SUBTYPE, found_event(TEST_SUBTYPE, "nolabel"));
+        let found = d.poll_found(h);
+        assert!(names(&found, "F52AC107C954E38E-0000000000000042"));
+        assert!(!names(&found, "nolabel"), "a dotless fullname is malformed");
+        assert!(found.iter().all(|n| !n.is_empty()));
+        d.stop_query(h);
+    }
+
+    /// T4: `poll_results` and `poll_found` share one drain, so whichever runs
+    /// first fans every pending event out to both kinds of buffer and neither
+    /// call order loses anything. Events go through `queue_for_test`, which
+    /// leaves them for the next drain instead of fanning them out at once.
+    #[test]
+    fn poll_results_and_poll_found_share_one_drain_in_either_order() {
+        let ty = ServiceKind::Operational.service_type();
+        let mut d = MdnsSdDiscovery::new().unwrap();
+        let h = d.query(ServiceKind::Operational).unwrap();
+
+        d.queue_for_test(ty, resolved_event("t4-first", ServiceKind::Operational));
+        d.queue_for_test(ty, found_event(ty, "t4-first._matter._tcp.local."));
+        assert!(contains(&d.poll_results(h), "t4-first"));
+        assert!(
+            names(&d.poll_found(h), "t4-first"),
+            "the drain `poll_results` did must have buffered the found event",
+        );
+
+        d.queue_for_test(ty, resolved_event("t4-second", ServiceKind::Operational));
+        d.queue_for_test(ty, found_event(ty, "t4-second._matter._tcp.local."));
+        assert!(
+            names(&d.poll_found(h), "t4-second"),
+            "`poll_found` must drain on its own",
+        );
+        assert!(
+            contains(&d.poll_results(h), "t4-second"),
+            "the drain `poll_found` did must have buffered the resolved record",
+        );
+        d.stop_query(h);
+    }
+
+    /// T5: a handle nobody calls `poll_found` on (the controller's base handle)
+    /// costs bounded memory: at the cap the OLDEST name is dropped. Driven
+    /// through `fan_out_event` directly so no live daemon event can perturb the
+    /// count.
+    #[test]
+    fn a_found_buffer_drops_its_oldest_name_at_the_cap() {
+        let ty = ServiceKind::Operational.service_type();
+        let h = QueryHandle(1);
+        let mut pending: HashMap<QueryHandle, Vec<MatterService>> = HashMap::new();
+        let mut surfaced: HashMap<String, MatterService> = HashMap::new();
+        let mut found: HashMap<QueryHandle, Vec<String>> = HashMap::new();
+        pending.insert(h, Vec::new());
+        found.insert(h, Vec::new());
+        for i in 0..=FOUND_BUFFER_CAP {
+            fan_out_event(
+                ty,
+                &mut pending,
+                &mut surfaced,
+                &mut found,
+                found_event(ty, &format!("cap-{i:03}._matter._tcp.local.")),
+            );
+        }
+        let buffer = &found[&h];
+        assert_eq!(buffer.len(), FOUND_BUFFER_CAP);
+        assert_eq!(
+            buffer.first().map(String::as_str),
+            Some("cap-001"),
+            "cap-000 was dropped"
+        );
+        assert_eq!(
+            buffer.last().map(String::as_str),
+            Some(format!("cap-{FOUND_BUFFER_CAP:03}").as_str()),
+        );
+        assert!(pending[&h].is_empty(), "a found event is not a record");
     }
 }
