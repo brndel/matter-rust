@@ -415,6 +415,22 @@ const ADVERT_WATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// but its pulls still count toward it.
 const ADVERT_PULL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long after any subtype-browse open its found events are discarded.
+///
+/// Opening a browse makes the mDNS daemon flush every PTR it already caches to
+/// it as found events: those are not devices re-announcing, they are the cache.
+/// Judged by when the event is drained (`poll_found` returns it), not when it
+/// arrived; at the 250 ms / 1 s drain cadences the difference is immaterial.
+/// The cost is that a device returning within this window of an open has its
+/// advert discarded and recovers on the backoff.
+#[cfg(not(test))]
+const ADVERT_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+/// Shortened under `cfg(test)` so the in-crate end-to-end test need not sleep
+/// 5 s; unit tests use the constant, never a literal. Integration tests link
+/// the lib without `cfg(test)` and get 5 s.
+#[cfg(test)]
+const ADVERT_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// chip `GetFibonacciForIndex` (F(0)=0, F(1)=1, F(2)=1, F(3)=2, …).
 fn fibonacci(n: u32) -> u64 {
     let (mut a, mut b) = (0u64, 1u64);
@@ -1425,6 +1441,10 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     /// When the resubscribe watch may next retry a subtype browse that failed to
     /// open; `None` when no retry is pending. See [`WATCH_OPEN_RETRY`].
     watch_open_retry_at: Option<Instant>,
+    /// Found events drained from the subtype browse before this instant are
+    /// discarded ([`ADVERT_QUIET_WINDOW`]); set at every subtype open, by
+    /// whichever opener, and cleared when it closes.
+    advert_quiet_until: Option<Instant>,
     /// Operational records drained from that browse, keyed by ASCII-lowercased
     /// instance name. A drain consumes what it returns, so every record is
     /// cached — not just the ones a resolve is parked for right now — or a
@@ -2062,6 +2082,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             resolve_base_after: None,
             resolve_query_fabric_cfid: None,
             watch_open_retry_at: None,
+            advert_quiet_until: None,
             seen_records: HashMap::new(),
             multicast_if: None,
             group_counters: HashMap::new(),
@@ -3756,6 +3777,9 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             .query_operational_fabric(compressed_fabric_id)?;
         self.resolve_query_fabric = Some(handle);
         self.resolve_query_fabric_cfid = Some(compressed_fabric_id);
+        // The daemon flushes its cached PTRs to a fresh browse as found
+        // events; those are not adverts.
+        self.advert_quiet_until = Some(Instant::now() + ADVERT_QUIET_WINDOW);
         Ok(())
     }
 
@@ -3767,6 +3791,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// release stops it then, once.
     fn close_subtype_browse(&mut self) {
         self.resolve_query_fabric_cfid = None;
+        self.advert_quiet_until = None;
         if let Some(handle) = self.resolve_query_fabric.take() {
             if self.resolve_query != Some(handle) {
                 self.discovery.stop_query(handle);
@@ -3937,6 +3962,76 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             ),
         }
         pulled
+    }
+
+    /// Distinct node ids with a subscription in a resubscribe episode whose
+    /// consumer is still listening: the nodes an advert can matter for.
+    fn resubscribe_episode_nodes(&self) -> Vec<u64> {
+        let mut nodes: Vec<u64> = self
+            .resubscribe_episode_entries()
+            .filter(|(_, _, tx)| !tx.consumer_gone())
+            .map(|(_, node_id, _)| node_id)
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
+    }
+
+    /// Drain the subtype browse's found events (new PTR records,
+    /// [`Discovery::poll_found`]) and pull forward the resubscribes of every
+    /// waiting node that re-announced. Runs in the same pass as the
+    /// `poll_results` drains in [`Self::drive_pending_resolves`], whenever the
+    /// subtype handle is held (parked resolve, watch, or both).
+    ///
+    /// - Only the **subtype** handle is asked, and not when it is the same
+    ///   handle as the base one: a fresh base browse flushes the daemon's whole
+    ///   `_matter._tcp` cache to it as found events.
+    /// - Events drained inside [`ADVERT_QUIET_WINDOW`] after the subtype open
+    ///   are discarded (consumed, not deferred).
+    /// - Events count only for the fabric the browse was opened for, and only
+    ///   while it is still the sole fabric. Each waiting node's instance name
+    ///   (`<cfid>-<node>`) is compared case-insensitively, as `record_key` does;
+    ///   the name embeds the compressed fabric id, so the same node id on
+    ///   another fabric cannot match.
+    ///
+    /// A found event is not a resolution: the pulled attempt's connect may park
+    /// until the matching record lands, which chip sends in the same
+    /// announcement, so usually in the same pass.
+    fn poll_advert_found(&mut self, now: Instant) {
+        let Some(handle) = self.resolve_query_fabric else {
+            return;
+        };
+        if self.resolve_query == Some(handle) {
+            return;
+        }
+        let found = self.discovery.poll_found(handle);
+        if found.is_empty() {
+            return;
+        }
+        if self.advert_quiet_until.is_some_and(|until| now < until) {
+            tracing::debug!(
+                target: "matter_controller::actor",
+                discarded = found.len(),
+                "subtype browse found events inside the quiet window after its open; \
+                 discarded as the daemon's cache flush",
+            );
+            return;
+        }
+        let Some(cfid) = self.resolve_query_fabric_cfid else {
+            return;
+        };
+        if self.sole_compressed_fabric_id().ok() != Some(cfid) {
+            return;
+        }
+        for node_id in self.resubscribe_episode_nodes() {
+            let instance = matter_commissioning::driver::operational_instance_name(cfid, node_id);
+            if found
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&instance))
+            {
+                self.trigger_resubscribe(node_id, TriggerSource::Advert, now);
+            }
+        }
     }
 
     /// Remove the cached route `(fabric_id, node_id)` if — and only if — it
@@ -4201,6 +4296,8 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             let services = self.discovery.poll_results(*handle);
             self.record_seen(&services, now, source);
         }
+        // Adverts ride the same pass as the record drains.
+        self.poll_advert_found(now);
 
         // Classify first, act after: the effects below need `&mut self`, which
         // the parked list cannot be borrowed across.
@@ -19934,5 +20031,249 @@ mod tests {
             stopped.is_ok(),
             "resubscribe_now must report ControllerStopped"
         );
+    }
+
+    /// An instant just past the quiet window of a subtype browse opened now.
+    fn after_quiet_window() -> Instant {
+        Instant::now() + ADVERT_QUIET_WINDOW + Duration::from_millis(1)
+    }
+
+    /// Spec test 1: a found event for the node, drained after the quiet window
+    /// on the real drive path, pulls its queued resubscribe forward.
+    #[tokio::test]
+    async fn an_advert_pulls_a_queued_resubscribe_forward() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 5, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        tokio::time::sleep(ADVERT_QUIET_WINDOW + Duration::from_millis(50)).await;
+        state
+            .lock()
+            .unwrap()
+            .subtype_found
+            .push(operational_instance_name(cfid, WATCH_NODE_A));
+        actor.drive_pending_resolves();
+        let (retry, at) = queued_state(&actor, 1);
+        assert_eq!(retry, 0);
+        assert!(at <= Instant::now());
+    }
+
+    /// Spec test 2: a resolved record without a found event (the base-stop
+    /// re-resolution) does not pull, and the base handle is never asked for
+    /// found events.
+    #[tokio::test]
+    async fn only_found_events_on_the_subtype_handle_pull() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let name_a = operational_instance_name(cfid, WATCH_NODE_A);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 5, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        tokio::time::sleep(ADVERT_QUIET_WINDOW + Duration::from_millis(50)).await;
+
+        state
+            .lock()
+            .unwrap()
+            .subtype_records
+            .push(op_record(&name_a));
+        actor.drive_pending_resolves();
+        assert_eq!(queued_state(&actor, 1).0, 5, "a record is not an advert");
+
+        // Open the base fallback behind another node's parked connect, then
+        // put a found event for A on the BASE browse.
+        let (other, _other_reports, _other_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(fabric_id, WATCH_NODE_B, ConnectWaiter::Resubscribe(other));
+        actor.resolve_base_after = Some(just_past());
+        actor.drive_pending_resolves();
+        assert_eq!(actor.resolve_query, Some(WATCH_BASE_HANDLE));
+        state.lock().unwrap().base_found.push(name_a);
+        actor.poll_advert_found(after_quiet_window());
+        assert_eq!(
+            queued_state(&actor, 1).0,
+            5,
+            "base found events never count"
+        );
+        assert!(
+            !state
+                .lock()
+                .unwrap()
+                .found_polls
+                .contains(&WATCH_BASE_HANDLE),
+            "the base handle is never polled for found events"
+        );
+    }
+
+    /// Spec test 3: a found event inside the quiet window is discarded — and
+    /// stays consumed — while one after it pulls.
+    #[tokio::test]
+    async fn found_events_inside_the_quiet_window_are_discarded() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let name_a = operational_instance_name(cfid, WATCH_NODE_A);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 5, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+
+        state.lock().unwrap().subtype_found.push(name_a.clone());
+        actor.poll_advert_found(Instant::now());
+        assert_eq!(queued_state(&actor, 1).0, 5, "the daemon's cache flush");
+        actor.poll_advert_found(after_quiet_window());
+        assert_eq!(queued_state(&actor, 1).0, 5, "consumed, not deferred");
+
+        state.lock().unwrap().subtype_found.push(name_a);
+        actor.poll_advert_found(after_quiet_window());
+        assert_eq!(queued_state(&actor, 1).0, 0);
+    }
+
+    /// Spec test 3: the window also follows a subtype `spawn_connect` opened
+    /// (the shared helper).
+    #[tokio::test]
+    async fn the_quiet_window_also_follows_a_subtype_opened_by_spawn_connect() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 5, Instant::now());
+        actor.enqueue_connect_waiter(fabric_id, WATCH_NODE_A, ConnectWaiter::Resubscribe(pr));
+        assert_eq!(state.lock().unwrap().subtype_opens, 1);
+        assert!(actor
+            .advert_quiet_until
+            .is_some_and(|until| until > Instant::now()));
+        state
+            .lock()
+            .unwrap()
+            .subtype_found
+            .push(operational_instance_name(cfid, WATCH_NODE_A));
+        actor.poll_advert_found(Instant::now());
+        let ConnectWaiter::Resubscribe(waiting) = &actor.pending_connects[&WATCH_NODE_A][0] else {
+            panic!("the waiter is still parked");
+        };
+        assert_eq!(waiting.retry_count, 5);
+    }
+
+    /// Spec test 6: an advert names exactly one node on exactly one fabric.
+    #[tokio::test]
+    async fn an_advert_for_another_node_or_fabric_does_not_pull() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let (first, _first_reports, _first_ctrl) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 5, far_future());
+        let (second, _second_reports, _second_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 5, far_future());
+        actor.resubscribes.extend([first, second]);
+        actor.reconcile_resubscribe_watch(Instant::now());
+
+        state.lock().unwrap().subtype_found.extend([
+            operational_instance_name(cfid, WATCH_NODE_B),
+            operational_instance_name([0x11; 8], WATCH_NODE_A),
+        ]);
+        actor.poll_advert_found(after_quiet_window());
+        assert_eq!(queued_state(&actor, 1).0, 5, "A untouched");
+        assert_eq!(queued_state(&actor, 2).0, 0, "B pulled");
+    }
+
+    /// Review focus 2: DNS-SD names compare case-insensitively.
+    #[tokio::test]
+    async fn a_lowercase_advert_still_pulls() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 5, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        state
+            .lock()
+            .unwrap()
+            .subtype_found
+            .push(operational_instance_name(cfid, WATCH_NODE_A).to_ascii_lowercase());
+        actor.poll_advert_found(after_quiet_window());
+        assert_eq!(queued_state(&actor, 1).0, 0);
+    }
+
+    /// Review focus 1: found events from a handle opened for another fabric
+    /// are never adverts.
+    #[tokio::test]
+    async fn found_events_on_a_handle_opened_for_another_fabric_are_not_adverts() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 5, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        actor.resolve_query_fabric_cfid = Some([0xEE; 8]);
+        state.lock().unwrap().subtype_found.extend([
+            operational_instance_name(cfid, WATCH_NODE_A),
+            operational_instance_name([0xEE; 8], WATCH_NODE_A),
+        ]);
+        actor.poll_advert_found(after_quiet_window());
+        assert_eq!(queued_state(&actor, 1).0, 5);
+    }
+
+    /// Spec test 10 (rest): with one handle serving both browses, found events
+    /// are never polled while both are held, and the API still works.
+    #[tokio::test]
+    async fn equal_handles_poll_no_found_events_but_the_api_still_pulls() {
+        let (discovery, state) = watch_discovery();
+        state.lock().unwrap().equal_handles = true;
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 5, far_future());
+        actor.resubscribes.push(pr);
+        let (other, _other_reports, _other_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(fabric_id, WATCH_NODE_B, ConnectWaiter::Resubscribe(other));
+        actor.resolve_base_after = Some(just_past());
+        actor.drive_pending_resolves();
+        assert_eq!(actor.resolve_query, actor.resolve_query_fabric);
+        // Before the base fallback opened, `spawn_connect`'s own settle pass
+        // DID poll the (then subtype-only) handle — correctly, it was not yet
+        // shared. The rule under test starts here, once both browses are the
+        // same handle, so forget those earlier polls.
+        state.lock().unwrap().found_polls.clear();
+
+        state
+            .lock()
+            .unwrap()
+            .base_found
+            .push(operational_instance_name(cfid, WATCH_NODE_A));
+        actor.poll_advert_found(after_quiet_window());
+        assert!(
+            state.lock().unwrap().found_polls.is_empty(),
+            "never polled while the handle is shared with the base browse"
+        );
+        assert_eq!(queued_state(&actor, 1).0, 5, "no pull");
+
+        assert_eq!(
+            actor.trigger_resubscribe(WATCH_NODE_A, TriggerSource::Api, Instant::now()),
+            1
+        );
+    }
+
+    /// Spec test 10 (rest): a `Discovery` that keeps the default `poll_found`
+    /// (here: `SubtypeOnlyDiscovery`) — no pull, no panic.
+    #[tokio::test]
+    async fn a_discovery_with_the_default_poll_found_never_pulls() {
+        let discovery = SubtypeOnlyDiscovery {
+            addr: "127.0.0.1:5540".parse().unwrap(),
+            instance_name: "unused".to_string(),
+            subtype_handle: QueryHandle(77),
+            fabric_queries: Arc::new(std::sync::Mutex::new(Vec::new())),
+            base_opens: Arc::new(std::sync::Mutex::new(0)),
+        };
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 5, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(actor.resolve_query_fabric, Some(QueryHandle(77)));
+        actor.poll_advert_found(after_quiet_window());
+        assert_eq!(queued_state(&actor, 1).0, 5);
     }
 }
