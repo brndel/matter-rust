@@ -24,13 +24,14 @@ APIs have had no outside users yet and are expected to move.
 
 ## matter-transport 0.7.2 + matter-controller 0.16.0
 
-A subscription whose device dropped off the network now comes back as soon as
-the device re-announces itself, instead of waiting out its retry backoff.
-Reported from the field by WeaveHome (phunapps/weavehome#1161): a Tapo H100
-bridge unplugged for about 6.5 minutes was back on the network within a minute
-of power returning, but its subscription was not re-established for another
-9 minutes. By then the retry backoff (chip's `ComputeTimeTillNextSubscription`,
-which we follow) had grown to minutes, and nothing shortened it.
+For most Wi-Fi and Ethernet devices, a subscription whose device dropped off
+the network now comes back as soon as the device re-announces itself, instead of
+waiting out its retry backoff (see the known limitations below for the cases
+this does not cover). Reported from the field by WeaveHome: a Tapo H100 bridge
+was unplugged for about 6.5 minutes, and its subscription resumed only about
+9 minutes after the device was back on the network. By then the retry backoff
+(chip's `ComputeTimeTillNextSubscription`, which we follow) had grown to
+minutes, and nothing shortened it.
 
 `matter-transport` is a patch release: one new `Discovery` method with a default
 implementation, so no implementor breaks. `matter-controller` takes a minor bump
@@ -60,6 +61,10 @@ node is pulled forward: a scheduled retry fires immediately with its backoff
 reset, and a retry already in progress keeps running with its backoff reset, so
 if it fails the next try is seconds away, not minutes.
 
+This has a steady-state cost: while any subscription is waiting to resubscribe
+(possibly indefinitely, for a device that never returns), the controller holds
+one operational mDNS browse open and wakes about once per second to drain it.
+
 This follows Apple's `Matter.framework` (`MTROperationalBrowser` →
 `nodeMayBeAdvertisingOperational`), which calls chip's
 `ResetResubscriptionBackoff()` and `ReadClient::TriggerResubscribeIfScheduled`.
@@ -87,7 +92,9 @@ Known limitations:
 - An outage shorter than the device's PTR TTL leaves the PTR cached, so its
   return produces no new PTR and recovery follows the backoff, as before. That
   is 120 s on chip-based devices, but up to 75 minutes on stacks that use the
-  RFC 6762 default. A graceful reboot sends a goodbye and is detected regardless.
+  RFC 6762 default. A device that reboots quickly (a clean restart, say)
+  typically recovers on the early, short retries rather than through advert
+  detection.
 - Thread devices behind a border router whose SRP advertising proxy kept serving
   their records while they were offline produce no new PTR, so no advert is
   seen. Call `resubscribe_now` from a better signal.
@@ -95,8 +102,9 @@ Known limitations:
   discarded with the cache flush; recovery follows the backoff.
 - A custom `Discovery` (`MatterControllerBuilder::discovery`) gets advert
   recovery only if it overrides **both** `query_operational_fabric` and
-  `poll_found`. Otherwise call `resubscribe_now` from your own signal. The
-  default `MdnsSdDiscovery` does both.
+  `poll_found`. Otherwise call `resubscribe_now` from your own signal. One that
+  overrides only `poll_found` may see spurious advert pulls, bounded by the 30 s
+  per-subscription cooldown. The default `MdnsSdDiscovery` does both.
 
 ### matter-controller: Changed — failed resubscribe attempts are logged
 

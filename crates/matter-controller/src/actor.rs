@@ -2191,9 +2191,13 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// while it can still happen — and, while a receive backoff is in force, the
     /// instant it expires (`recv_backoff_until`, see below).
     /// With nothing at all scheduled the loop parks on [`IDLE_PARK_MAX`];
-    /// because all five sources are re-derived from live state after every
-    /// iteration, work scheduled by any other `select!` arm shortens the very
-    /// next park, so the backstop only bounds an unenumerated source.
+    /// because all seven sources ([`Self::next_timer_deadline`]: MRP
+    /// retransmit/ack-flush, subscription liveness, resubscribe attempt times,
+    /// the mDNS drain tick, application response deadlines, the receive
+    /// backoff, and a failed watch open's retry) are re-derived from live state
+    /// after every iteration, work scheduled by any other `select!` arm
+    /// shortens the very next park, so the backstop only bounds an
+    /// unenumerated source.
     ///
     /// The consequence is that a fully idle controller (no in-flight MRP, no
     /// subscriptions, no parked resolves) wakes essentially never, instead of
@@ -2254,9 +2258,11 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             // advances every deadline forward — MRP `handle_timeout` reschedules
             // or drops, liveness/resubscribe entries are consumed or re-armed,
             // and `drive_pending_resolves` re-arms `next_resolve_poll` — so the
-            // guard yields back to recv on the next iteration. The recv-backoff
-            // deadline is the fifth source and is retired above before it can
-            // ever be seen here as due.
+            // guard yields back to recv on the next iteration. Two of the seven
+            // sources (see `next_timer_deadline`) are future-only by
+            // construction and so can never be seen here as due: the
+            // recv-backoff deadline, retired above, and the watch-open retry,
+            // which counts only while it is still in the future.
             if next_deadline.is_some_and(|d| d <= now) {
                 self.drive_mrp().await;
                 self.drive_response_deadlines().await;
@@ -4311,24 +4317,6 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         self.release_resolve_query_if_idle();
     }
 
-    /// Settle the parked resolves: drain the shared browse ONCE into
-    /// `seen_records`, then match every parked entry against that cache — hits
-    /// spawn their handshake, entries past [`RESOLVE_DEADLINE`] fail their node's
-    /// waiters, the rest stay parked.
-    ///
-    /// The single drain is required for correctness, not just economy:
-    /// [`Discovery::poll_results`] consumes what it returns, so a second drain
-    /// elsewhere would steal records from entries this pass has not examined —
-    /// and matching against the *cache* rather than this pass's snapshot is what
-    /// stops a record that arrived before its resolve did from being lost (see
-    /// [`SEEN_RECORD_TTL`]).
-    ///
-    /// Called from the timer arm, so [`RESOLVE_POLL_INTERVAL`] is the resolve's
-    /// polling interval (the inline resolve it replaces polled every 100 ms), and once
-    /// from [`Self::spawn_connect`] so an already-known record connects at once.
-    /// Returns immediately when nothing is parked and the resubscribe watch
-    /// holds no browse — an idle controller pays nothing. With only the watch
-    /// held it drains the subtype browse every [`ADVERT_WATCH_POLL_INTERVAL`].
     /// Open the base-type `_matter._tcp` fallback browse if its deadline has
     /// come and it is not open already — the delayed half of the #113 fix.
     ///
@@ -4375,6 +4363,24 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         }
     }
 
+    /// Settle the parked resolves: drain the shared browse ONCE into
+    /// `seen_records`, then match every parked entry against that cache — hits
+    /// spawn their handshake, entries past [`RESOLVE_DEADLINE`] fail their node's
+    /// waiters, the rest stay parked.
+    ///
+    /// The single drain is required for correctness, not just economy:
+    /// [`Discovery::poll_results`] consumes what it returns, so a second drain
+    /// elsewhere would steal records from entries this pass has not examined —
+    /// and matching against the *cache* rather than this pass's snapshot is what
+    /// stops a record that arrived before its resolve did from being lost (see
+    /// [`SEEN_RECORD_TTL`]).
+    ///
+    /// Called from the timer arm, so [`RESOLVE_POLL_INTERVAL`] is the resolve's
+    /// polling interval (the inline resolve it replaces polled every 100 ms), and once
+    /// from [`Self::spawn_connect`] so an already-known record connects at once.
+    /// Returns immediately when nothing is parked and the resubscribe watch
+    /// holds no browse — an idle controller pays nothing. With only the watch
+    /// held it drains the subtype browse every [`ADVERT_WATCH_POLL_INTERVAL`].
     fn drive_pending_resolves(&mut self) {
         // Re-arm the polling tick FIRST, before any early return: the loop only
         // consults it while entries are parked or the resubscribe watch holds

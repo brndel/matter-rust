@@ -85,13 +85,15 @@
 //! value — every record it drops, under the `matter_transport::mdns` target:
 //!
 //! - `debug`: browse started, record surfaced, record dropped (no addresses,
-//!   unrecognised service type).
+//!   unrecognised service type), `ServiceFound` ignored because its fullname
+//!   is malformed (no leading instance label).
 //! - `warn`: record dropped because it is malformed (fullname with no instance
 //!   label) — that is a peer bug, not a normal condition.
 //! - `trace`: every non-`ServiceResolved` browse event, by variant. A
 //!   `ServiceFound` with no matching `ServiceResolved` means the resolver never
 //!   completed SRV/address resolution for that instance, which is otherwise
-//!   undiagnosable.
+//!   undiagnosable. Also: a handle's found-event buffer dropping its oldest
+//!   name at the 256-name cap.
 //!
 //! Nothing is logged unless the caller installs a `tracing` subscriber; with
 //! none installed each site is a cheap dispatcher check.

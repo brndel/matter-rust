@@ -781,17 +781,25 @@ impl MatterController {
     ///   serving their records while they were offline (no new advertisement
     ///   appears when they return);
     /// - an outage shorter than the device's advertisement TTL (120 s on
-    ///   chip-based devices, up to 75 minutes on others), unless it rebooted
-    ///   gracefully;
+    ///   chip-based devices, up to 75 minutes on others). A device that
+    ///   reboots quickly (a clean restart, say) typically recovers on the
+    ///   early, short retries instead, not through advert detection;
     /// - a device that returns within 5 s of the watch starting;
     /// - a custom [`Discovery`] passed to
     ///   [`MatterControllerBuilder::discovery`](crate::MatterControllerBuilder::discovery)
     ///   that does not override both
     ///   [`query_operational_fabric`](matter_transport::Discovery::query_operational_fabric)
-    ///   and [`poll_found`](matter_transport::Discovery::poll_found). The default
-    ///   `MdnsSdDiscovery` overrides both.
+    ///   and [`poll_found`](matter_transport::Discovery::poll_found). One that
+    ///   overrides only `poll_found` may see spurious advert pulls, bounded by
+    ///   the 30 s per-subscription cooldown. The default `MdnsSdDiscovery`
+    ///   overrides both.
     ///
     /// In those cases, call this from whatever signal you have.
+    ///
+    /// The watch has a steady-state cost: while any subscription is waiting
+    /// (possibly indefinitely, for a device that never returns), the
+    /// controller holds one operational mDNS browse open and wakes about once
+    /// per second to drain it.
     ///
     /// Returns how many subscriptions it affected: scheduled retries pulled
     /// forward plus in-progress retries whose backoff it reset. `Ok(0)` means
