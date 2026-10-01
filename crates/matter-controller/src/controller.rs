@@ -760,7 +760,9 @@ impl MatterController {
     ///   to the start of the sequence;
     /// - a retry already **in progress** keeps running (a duplicate attempt is
     ///   never started), but its backoff is reset, so if it fails the next try
-    ///   comes seconds later, not minutes.
+    ///   comes seconds later, not minutes;
+    /// - a retry that is already **due** (about to fire anyway) keeps its time
+    ///   but also has its backoff reset. It is not counted in the return value.
     ///
     /// This is chip's `ReadClient::TriggerResubscribeIfScheduled` together with
     /// `ResetResubscriptionBackoff`, as Apple's `Matter.framework` calls them
