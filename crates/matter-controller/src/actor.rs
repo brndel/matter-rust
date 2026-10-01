@@ -3685,9 +3685,16 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// cache survive. The held handle, its cfid, and the advert quiet window
     /// are not touched.
     ///
-    /// The replayed records go through [`record_seen`](Self::record_seen), the
-    /// same path as every drain, so TTL and address filtering apply; the
-    /// caller's settle pass then matches the target against the cache. Found
+    /// What is replayed is the adapter's mirror of the daemon's **live** cache:
+    /// an instance whose PTR/SRV expired or that sent a goodbye has been
+    /// dropped from it, so a replayed record is bounded by its own mDNS TTL —
+    /// not by [`SEEN_RECORD_TTL`], which says nothing about a record that is
+    /// stamped as it is cached. A replayed record whose instance already has a
+    /// fresh `seen_records` entry ([`Self::has_fresh_record`]) is skipped, so
+    /// the replay never overwrites a fresher entry or re-stamps a live one.
+    /// The rest go through [`record_seen`](Self::record_seen) like any drain —
+    /// address filtering applies and each is stamped now — and the caller's
+    /// settle pass then matches the target against the cache. Found
     /// events are never replayed to a new handle, but this drain may fan new
     /// ones out; each also reached the held handle, which
     /// [`Self::poll_advert_found`] reads, so this handle's copy is discarded.
@@ -3717,13 +3724,19 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         if self.resolve_query_fabric == Some(handle) || self.resolve_query == Some(handle) {
             return;
         }
-        let services = self.discovery.poll_results(handle);
+        let replayed = self.discovery.poll_results(handle);
         let _ = self.discovery.poll_found(handle);
         self.discovery.stop_query(handle);
+        let replayed_count = replayed.len();
+        let services: Vec<matter_transport::MatterService> = replayed
+            .into_iter()
+            .filter(|svc| !self.has_fresh_record(&svc.instance_name))
+            .collect();
         tracing::debug!(
             target: "matter_controller::actor",
             node_id,
-            replayed = services.len(),
+            replayed = replayed_count,
+            cached = services.len(),
             "connect: target not cached; replayed the held subtype browse \
              through a short-lived second handle",
         );
@@ -19617,6 +19630,44 @@ mod tests {
         let s = state.lock().unwrap();
         assert_eq!(s.subtype_opens, 1, "no replay attach for a fresh record");
         assert!(s.stops.is_empty(), "{:?}", s.stops);
+    }
+
+    /// Follow-up to F1: the replay never overwrites a fresher cache entry.
+    /// Connecting to C (not cached) triggers the replay, which also carries
+    /// B's last-surfaced record; B already has a fresh entry from the watch's
+    /// own drain (a different port here), and that entry must survive as-is —
+    /// same peer, same `seen` stamp.
+    #[tokio::test]
+    async fn the_replay_leaves_an_already_fresh_entry_alone() {
+        const WATCH_NODE_C: u64 = 0x0C;
+        let (mut actor, state, _reports, _ctrl) = held_watch_with_b_surfaced();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let b_name = operational_instance_name(cfid, WATCH_NODE_B);
+        let b_key = Actor::<InMemoryDatagram, WatchDiscovery>::record_key(&b_name);
+        let fresh_b = MatterService::new(
+            b_name.clone(),
+            ServiceKind::Operational,
+            vec!["127.0.0.1".parse().unwrap()],
+            5599,
+            std::collections::HashMap::new(),
+        );
+        let stamped = Instant::now();
+        actor.record_seen(&[fresh_b], stamped, BROWSE_SUBTYPE);
+
+        let (pr_c, _c_reports, _c_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_C, 0, Instant::now());
+        actor.enqueue_connect_waiter(fabric_id, WATCH_NODE_C, ConnectWaiter::Resubscribe(pr_c));
+
+        assert_eq!(
+            state.lock().unwrap().stops,
+            vec![WATCH_REPLAY_HANDLE],
+            "precondition: the replay ran"
+        );
+        let b = actor.seen_records.get(&b_key).expect("B still cached");
+        assert_eq!(b.peer.port(), 5599, "the fresher entry was not overwritten");
+        assert_eq!(b.seen, stamped, "and not re-stamped");
+        assert_eq!(actor.pending_resolves.len(), 1, "C itself stays parked");
     }
 
     /// Final-review F1, failed attach: a daemon that refuses the second handle
