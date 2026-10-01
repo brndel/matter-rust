@@ -28,8 +28,9 @@
 //! `ServiceResolved` only when a record *changes*, so a stable service that
 //! resolved before the handle attached would produce no event for the life of
 //! the browse. The adapter therefore keeps its own replay cache of the last
-//! record surfaced per instance name and seeds each newly attached handle from
-//! it, so attaching late is equivalent to having been attached all along.
+//! record surfaced per instance name — dropped again when the daemon reports
+//! the instance removed — and seeds each newly attached handle from it, so
+//! attaching late is equivalent to having been attached all along.
 //!
 //! # Compressed-fabric subtype browses
 //!
@@ -158,9 +159,16 @@ struct BrowseState {
     /// never pushes it into `changes`), so a never-polled handle grows with
     /// record churn on the link, not with elapsed time.
     pending: HashMap<QueryHandle, Vec<MatterService>>,
-    /// The last record surfaced for each instance name, kept for the life of
-    /// the browse so a handle attached *after* a record was surfaced can be
-    /// seeded with it.
+    /// The last record surfaced for each instance name, so a handle attached
+    /// *after* a record was surfaced can be seeded with it.
+    ///
+    /// It mirrors the daemon's **live** cache rather than everything ever
+    /// seen: an instance is removed when mdns-sd reports `ServiceRemoved` for
+    /// it (its PTR/SRV expired, or it sent a goodbye) and re-added by its next
+    /// `ServiceResolved`. Without the removal, a browse held open for a long
+    /// time would keep replaying an offline device's last record as if it were
+    /// current. A removal never touches `pending`: what a handle was already
+    /// handed stays handed.
     ///
     /// This is our own replay cache and it exists because mdns-sd gives us
     /// none: skipping `daemon.browse` for a type we already browse (which the
@@ -625,7 +633,9 @@ impl Discovery for MdnsSdDiscovery {
 /// `browse` is the exact string this browse was opened with, logged with every
 /// surfaced record so a trace shows **which** browse produced it — base type or
 /// compressed-fabric subtype (issue #113). A `ServiceFound` is also appended,
-/// as an instance name, to every handle's found buffer ([`buffer_found`]).
+/// as an instance name, to every handle's found buffer ([`buffer_found`]), and
+/// a `ServiceRemoved` drops its instance from `surfaced` (never from a
+/// handle's buffer).
 fn fan_out_event(
     browse: &str,
     pending: &mut HashMap<QueryHandle, Vec<MatterService>>,
@@ -635,6 +645,15 @@ fn fan_out_event(
 ) {
     if let ServiceEvent::ServiceFound(_, fullname) = &event {
         buffer_found(browse, found, fullname);
+    }
+    // The daemon no longer holds this instance, so the replay cache must stop
+    // offering it to late handles. Same split as `buffer_found` and the
+    // resolved-record path, so the key matches the one `surfaced` was filled
+    // under. Still traced below with every other non-resolved event.
+    if let ServiceEvent::ServiceRemoved(_, fullname) = &event {
+        if let Some(instance) = instance_name_from_fullname(fullname) {
+            surfaced.remove(&instance);
+        }
     }
     match event {
         ServiceEvent::ServiceResolved(info) => {
@@ -1580,6 +1599,57 @@ mod tests {
         assert!(names(&d.poll_found(early), "t2-node"));
         d.stop_query(early);
         d.stop_query(late);
+    }
+
+    /// A `ServiceRemoved` event exactly as mdns-sd emits it on PTR/SRV expiry
+    /// or a goodbye: `(ty_domain, fullname)`.
+    fn removed_event(service_type: &str, fullname: &str) -> ServiceEvent {
+        ServiceEvent::ServiceRemoved(service_type.to_string(), fullname.to_string())
+    }
+
+    /// `surfaced` mirrors the daemon's live cache: a record the daemon has
+    /// removed (expiry or goodbye) is no longer replayed to a late-attached
+    /// handle, and a later resolve puts it back. What a handle was already
+    /// handed stays handed — a removal never reaches into `pending`.
+    #[test]
+    fn a_removed_instance_is_not_replayed_until_it_resolves_again() {
+        let mut d = MdnsSdDiscovery::new().unwrap();
+        let watch = d.query_operational_fabric(TEST_CFID).unwrap();
+        d.deliver_for_type_for_test(
+            TEST_SUBTYPE,
+            resolved_event_under_subtype("rm-node", TEST_SUBTYPE),
+        );
+        assert!(contains(&d.poll_results(watch), "rm-node"));
+        // Attached while the record was live, not yet polled.
+        let unpolled = d.query_operational_fabric(TEST_CFID).unwrap();
+
+        d.deliver_for_type_for_test(
+            TEST_SUBTYPE,
+            removed_event(TEST_SUBTYPE, "rm-node._matter._tcp.local."),
+        );
+        let late = d.query_operational_fabric(TEST_CFID).unwrap();
+        assert!(
+            !contains(&d.poll_results(late), "rm-node"),
+            "a removed instance must not be replayed to a handle attached after \
+             the removal",
+        );
+        assert!(
+            contains(&d.poll_results(unpolled), "rm-node"),
+            "a removal must not reach into a handle's already-delivered buffer",
+        );
+
+        d.deliver_for_type_for_test(
+            TEST_SUBTYPE,
+            resolved_event_under_subtype("rm-node", TEST_SUBTYPE),
+        );
+        let later = d.query_operational_fabric(TEST_CFID).unwrap();
+        assert!(
+            contains(&d.poll_results(later), "rm-node"),
+            "resolved again: replayed again",
+        );
+        for h in [watch, unpolled, late, later] {
+            d.stop_query(h);
+        }
     }
 
     /// T3: on a subtype browse mdns-sd reports the PTR's alias, which is the
