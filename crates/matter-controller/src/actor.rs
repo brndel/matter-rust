@@ -3985,8 +3985,11 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// - **queued** with its attempt in the future: backoff reset to the start
     ///   (`retry_count = 0`) and `attempt_at = now`, so the existing
     ///   `drive_resubscribes` fires it on the next pass. Counted.
-    /// - **queued and already due**: left alone — it fires this pass anyway. Not
-    ///   counted.
+    /// - **queued and already due**: backoff reset (`retry_count = 0`) but its
+    ///   `attempt_at` is left alone — it fires this pass anyway. Not counted,
+    ///   so it gets no cooldown stamp and causes no route eviction. The reset
+    ///   still matters: if that attempt fails it is rescheduled on the first
+    ///   step, not on the step it had reached.
     /// - **in flight** (a `Subscribe` pending, or a connect waiter): backoff
     ///   reset, and no second attempt is started. If that attempt then fails it
     ///   is rescheduled on the first step (3–10 s), not a multi-minute one.
@@ -4001,8 +4004,10 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     ///
     /// This is chip's `ResetResubscriptionBackoff()` followed by
     /// `ReadClient::TriggerResubscribeIfScheduled`, which is what Apple's
-    /// `Matter.framework` calls when it sees an operational advert. A forgotten
-    /// node has no entries, so nothing is resurrected. Never fails.
+    /// `Matter.framework` calls when it sees an operational advert. Apple
+    /// resets the backoff unconditionally, whatever state the attempt is in,
+    /// which is why the already-due case resets too. A forgotten node has no
+    /// entries, so nothing is resurrected. Never fails.
     fn trigger_resubscribe(&mut self, node_id: u64, source: TriggerSource, now: Instant) -> usize {
         let honour_cooldown = source == TriggerSource::Advert;
         let pulled_at = &self.resubscribe_pulled_at;
@@ -4019,10 +4024,11 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             if pr.node_id != node_id || pr.tx.consumer_gone() || cooling(pr.sub_id) {
                 continue;
             }
+            pr.retry_count = 0;
             if pr.attempt_at <= now {
+                // Due already: it fires this pass; only the backoff is reset.
                 continue;
             }
-            pr.retry_count = 0;
             pr.attempt_at = now;
             moved_queued = true;
             counted.push(pr.sub_id);
@@ -19935,10 +19941,17 @@ mod tests {
             1
         );
         assert_eq!(queued_state(&actor, 1), (0, now));
+        // Already due: it fires this pass anyway, so it is neither moved nor
+        // counted nor stamped — but its backoff IS reset (chip/Apple reset
+        // unconditionally), so a failure of that attempt retries on step 1.
         assert_eq!(
             queued_state(&actor, 2),
-            (6, past),
-            "already due: not counted"
+            (0, past),
+            "already due: backoff reset, attempt time unchanged"
+        );
+        assert!(
+            !actor.resubscribe_pulled_at.contains_key(&SubId(2)),
+            "already due: not counted, so no cooldown stamp"
         );
         assert_eq!(queued_state(&actor, 3), (6, far), "cooldown");
         assert_eq!(queued_state(&actor, 4), (6, far), "consumer gone");
