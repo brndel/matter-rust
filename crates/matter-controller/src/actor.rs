@@ -86,9 +86,10 @@ fn response_needs_timed(opcode: u8, payload: &[u8]) -> bool {
 ///
 /// mDNS results arrive by *polling* ([`Actor::drive_pending_resolves`] drains
 /// [`Discovery::poll_results`]), not on a stored deadline, so this is the only
-/// remaining periodic component of the actor's park: it applies solely while
-/// `pending_resolves` is non-empty. Every other timer source contributes a real
-/// deadline through [`Actor::next_timer_deadline`].
+/// remaining periodic component of the actor's park while `pending_resolves` is
+/// non-empty. While only the resubscribe watch holds the subtype browse the
+/// slower [`ADVERT_WATCH_POLL_INTERVAL`] applies instead. Every other timer
+/// source contributes a real deadline through [`Actor::next_timer_deadline`].
 ///
 /// [`Discovery::poll_results`]: matter_transport::Discovery::poll_results
 const RESOLVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -388,6 +389,21 @@ const RESUB_MIN_WAIT_PERCENT: u64 = 30;
 /// session MRP params + `kExpectedIMProcessingTime`; 5 s is a safe, tunable
 /// stand-in (too small ⇒ spurious resubscribes).
 const LIVENESS_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long the resubscribe watch waits before retrying a subtype browse that
+/// failed to open ([`Actor::reconcile_resubscribe_watch`]). Bounds what a
+/// daemon that keeps refusing costs — one attempt and one `debug!` line per
+/// interval — while still recovering promptly once it accepts.
+const WATCH_OPEN_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often the loop drains the fabric-subtype browse while the resubscribe
+/// watch is all that holds it open (no resolve parked).
+///
+/// The watch waits for a device to re-announce itself, which takes seconds to
+/// minutes, so it does not need [`RESOLVE_POLL_INTERVAL`]'s 250 ms: one wake a
+/// second per controller with a subscription waiting costs nothing, and adds
+/// at most a second to a recovery that was going to take minutes.
+const ADVERT_WATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// chip `GetFibonacciForIndex` (F(0)=0, F(1)=1, F(2)=1, F(3)=2, …).
 fn fibonacci(n: u32) -> u64 {
@@ -1274,17 +1290,18 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     /// known parks here instead of blocking the loop on a poll loop; at most one
     /// entry per node (`pending_connects` coalesces concurrent connects).
     pending_resolves: Vec<PendingResolve>,
-    /// When the next mDNS poll of `pending_resolves` is due.
+    /// When the next drain of the operational browses is due.
     ///
     /// mDNS results arrive by *polling*, so unlike every other timer source the
-    /// resolve tick has no naturally-occurring deadline — but it must still be
-    /// an ABSOLUTE instant rather than a `now + RESOLVE_POLL_INTERVAL` computed per
-    /// iteration: any other `select!` arm that fires more often than
-    /// [`RESOLVE_POLL_INTERVAL`] (a busy device, or a transport whose `recv_from`
-    /// returns errors back-to-back) would otherwise push a relative tick
-    /// forward forever and starve discovery. Advanced by
-    /// [`Self::drive_pending_resolves`]; only consulted while
-    /// `pending_resolves` is non-empty.
+    /// drain tick has no naturally-occurring deadline — but it must still be an
+    /// ABSOLUTE instant rather than a `now + interval` computed per iteration:
+    /// any other `select!` arm that fires more often than the interval (a busy
+    /// device, or a transport whose `recv_from` returns errors back-to-back)
+    /// would otherwise push a relative tick forward forever and starve
+    /// discovery. Advanced by [`Self::drive_pending_resolves`], which picks the
+    /// interval: [`RESOLVE_POLL_INTERVAL`] while a resolve is parked,
+    /// [`ADVERT_WATCH_POLL_INTERVAL`] while only the resubscribe watch holds the
+    /// subtype browse. Consulted only in those two states.
     next_resolve_poll: Instant,
     /// Consecutive `recv_from` errors in the current run.
     ///
@@ -1358,6 +1375,15 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     /// [`RESOLVE_POLL_INTERVAL`] while resolves are parked, so the fallback opens
     /// within one tick of becoming due and the actor gains no new timer source.
     resolve_base_after: Option<Instant>,
+    /// The compressed fabric id the held subtype browse (`resolve_query_fabric`)
+    /// was opened for, recorded by [`Self::open_subtype_browse`]. `None` when no
+    /// subtype browse is held, or once [`Self::reconcile_resubscribe_watch`]
+    /// found the sole fabric no longer matches it: found events from such a
+    /// handle are never counted as adverts.
+    resolve_query_fabric_cfid: Option<[u8; 8]>,
+    /// When the resubscribe watch may next retry a subtype browse that failed to
+    /// open; `None` when no retry is pending. See [`WATCH_OPEN_RETRY`].
+    watch_open_retry_at: Option<Instant>,
     /// Operational records drained from that browse, keyed by ASCII-lowercased
     /// instance name. A drain consumes what it returns, so every record is
     /// cached — not just the ones a resolve is parked for right now — or a
@@ -1992,6 +2018,8 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             resolve_query: None,
             resolve_query_fabric: None,
             resolve_base_after: None,
+            resolve_query_fabric_cfid: None,
+            watch_open_retry_at: None,
             seen_records: HashMap::new(),
             multicast_if: None,
             group_counters: HashMap::new(),
@@ -2082,9 +2110,11 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// the *scheduled work that actually exists* — MRP retransmit/ack-flush
     /// deadlines, subscription liveness deadlines, and pending resubscribe
     /// attempt times — with one exception: mDNS results arrive by polling rather
-    /// than on a deadline, so while `pending_resolves` is non-empty the deadline
-    /// also includes the [`RESOLVE_POLL_INTERVAL`] polling anchor
-    /// `next_resolve_poll` — and, while a receive backoff is in force, the
+    /// than on a deadline, so while `pending_resolves` is non-empty, or the
+    /// resubscribe watch holds the subtype browse, the deadline also includes
+    /// the polling anchor `next_resolve_poll` ([`RESOLVE_POLL_INTERVAL`] /
+    /// [`ADVERT_WATCH_POLL_INTERVAL`]), and a failed watch open's retry instant
+    /// while it can still happen — and, while a receive backoff is in force, the
     /// instant it expires (`recv_backoff_until`, see below).
     /// With nothing at all scheduled the loop parks on [`IDLE_PARK_MAX`];
     /// because all five sources are re-derived from live state after every
@@ -2158,6 +2188,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 self.drive_response_deadlines().await;
                 self.check_liveness();
                 self.drive_resubscribes().await;
+                self.reconcile_resubscribe_watch(Instant::now());
                 self.drive_pending_resolves();
                 continue;
             }
@@ -2229,6 +2260,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     self.drive_response_deadlines().await;
                     self.check_liveness();
                     self.drive_resubscribes().await;
+                    self.reconcile_resubscribe_watch(Instant::now());
                     self.drive_pending_resolves();
                 }
             }
@@ -2287,9 +2319,12 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     }
 
     /// Earliest instant any timer work is due: MRP retransmit/ack-flush,
-    /// subscription liveness, scheduled resubscribes — plus a polling tick
-    /// ([`RESOLVE_POLL_INTERVAL`]) only while mDNS resolves are parked, because
-    /// discovery results arrive by polling, not by deadline, and plus the recv
+    /// subscription liveness, scheduled resubscribes — plus a polling tick while
+    /// mDNS resolves are parked ([`RESOLVE_POLL_INTERVAL`]) or the resubscribe
+    /// watch holds the subtype browse ([`ADVERT_WATCH_POLL_INTERVAL`]), because
+    /// discovery results arrive by polling, not by deadline, plus a failed watch
+    /// open's retry instant while it is in the future and could happen, and plus
+    /// the recv
     /// backoff deadline while the recv arm is suppressed (else a loop with no
     /// other scheduled work would park past it and leave the arm disabled).
     /// `None` means nothing is scheduled and the loop parks on inbound/commands
@@ -2303,6 +2338,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// be pushed forward by every unrelated wakeup and could be starved
     /// indefinitely by a busy loop.
     fn next_timer_deadline(&self) -> Option<Instant> {
+        let now = Instant::now();
         let mrp = self.sessions.poll_timeout();
         let liveness = self
             .subscriptions
@@ -2310,11 +2346,27 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             .map(|e| e.liveness_deadline)
             .min();
         let resub = self.resubscribes.iter().map(|pr| pr.attempt_at).min();
-        let resolve = if self.pending_resolves.is_empty() {
+        // The drain tick: while a resolve is parked, and while the subtype
+        // browse is held (by the resubscribe watch) — both are served by
+        // polling, not by a deadline.
+        let resolve = if self.pending_resolves.is_empty() && self.resolve_query_fabric.is_none() {
             None
         } else {
             Some(self.next_resolve_poll)
         };
+        // A failed watch open is retried at `watch_open_retry_at`, but only a
+        // retry still in the FUTURE that could actually happen counts. A
+        // past-due or impossible one (no sole fabric, nothing waiting, a browse
+        // already held, a base browse live) would make the overdue guard in
+        // `run` fire on every pass — the spin `recv_backoff_until` is retired
+        // early to avoid.
+        let watch_retry = self.watch_open_retry_at.filter(|at| {
+            *at > now
+                && self.resolve_query_fabric.is_none()
+                && self.resolve_query.is_none()
+                && self.sole_fabric().is_ok()
+                && self.resubscribe_watch_needed()
+        });
         // Application-level response deadlines. Independent of `mrp` above:
         // once a request is ACKed its MRP entry is gone, so this is the only
         // remaining source that can bound a device which accepts a request and
@@ -2327,6 +2379,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             resolve,
             response,
             self.recv_backoff_until,
+            watch_retry,
         ]
         .into_iter()
         .flatten()
@@ -3648,6 +3701,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             .discovery
             .query_operational_fabric(compressed_fabric_id)?;
         self.resolve_query_fabric = Some(handle);
+        self.resolve_query_fabric_cfid = Some(compressed_fabric_id);
         Ok(())
     }
 
@@ -3658,6 +3712,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// `query_operational_fabric` returns one handle for both): the base
     /// release stops it then, once.
     fn close_subtype_browse(&mut self) {
+        self.resolve_query_fabric_cfid = None;
         if let Some(handle) = self.resolve_query_fabric.take() {
             if self.resolve_query != Some(handle) {
                 self.discovery.stop_query(handle);
@@ -3718,6 +3773,86 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             .any(|(_, _, tx)| !tx.consumer_gone())
     }
 
+    /// One reconcile step for the resubscribe watch, run once per timer drive
+    /// pass at both drive sites in [`Self::run`]: after `check_liveness` and
+    /// `drive_resubscribes`, so an episode that began this pass is seen, and
+    /// before `drive_pending_resolves`, so a browse opened here is drained in
+    /// the same pass. It never runs per inbound packet.
+    ///
+    /// - **Fabric changed** (no sole fabric, or not the one the held browse was
+    ///   opened for): stop counting its found events; close it if no resolve is
+    ///   parked, and let the next pass reopen it for the current fabric.
+    /// - **Close** the held browse when no episode needs it and no resolve is
+    ///   parked.
+    /// - **Open** one when an episode needs it, none is held, no base-type
+    ///   browse is live (a subtype browse beside a live base one recreates the
+    ///   #113 starvation), there is a sole fabric, and no failed open is waiting
+    ///   out [`WATCH_OPEN_RETRY`].
+    ///
+    /// Opens go through [`Self::open_subtype_browse`], the same helper
+    /// `spawn_connect` uses, so a browse a connect opened is recognised here
+    /// rather than churned.
+    fn reconcile_resubscribe_watch(&mut self, now: Instant) {
+        let needed = self.resubscribe_watch_needed();
+        let parked = !self.pending_resolves.is_empty();
+        if self.resolve_query_fabric.is_some() {
+            let current = self.sole_compressed_fabric_id().ok();
+            if current.is_none() || current != self.resolve_query_fabric_cfid {
+                self.resolve_query_fabric_cfid = None;
+                if !parked {
+                    tracing::debug!(
+                        target: "matter_controller::actor",
+                        "resubscribe watch: the fabric changed; closing the subtype browse",
+                    );
+                    self.close_subtype_browse();
+                }
+                return;
+            }
+            if !needed && !parked {
+                tracing::debug!(
+                    target: "matter_controller::actor",
+                    "resubscribe watch: no subscription is waiting; closing the subtype browse",
+                );
+                self.close_subtype_browse();
+            }
+            return;
+        }
+        if !needed
+            || self.resolve_query.is_some()
+            || self.watch_open_retry_at.is_some_and(|at| now < at)
+        {
+            return;
+        }
+        let Ok(cfid) = self.sole_compressed_fabric_id() else {
+            return;
+        };
+        match self.open_subtype_browse(cfid) {
+            Ok(()) => {
+                self.watch_open_retry_at = None;
+                // The drain tick counts toward the deadline from now on; make
+                // the anchor fresh here (the invariant `park_resolve` keeps), so
+                // a stale one cannot make the overdue guard run a wasted pass.
+                if !parked {
+                    self.next_resolve_poll = now + ADVERT_WATCH_POLL_INTERVAL;
+                }
+                tracing::debug!(
+                    target: "matter_controller::actor",
+                    subtype = %matter_transport::operational_fabric_subtype(cfid),
+                    "resubscribe watch: subtype browse opened",
+                );
+            }
+            Err(e) => {
+                self.watch_open_retry_at = Some(now + WATCH_OPEN_RETRY);
+                tracing::debug!(
+                    target: "matter_controller::actor",
+                    error = %e,
+                    retry_in_secs = WATCH_OPEN_RETRY.as_secs(),
+                    "resubscribe watch: subtype browse could not be opened; will retry",
+                );
+            }
+        }
+    }
+
     /// Drop any parked resolve for `node_id` (it has been resolved, failed, or
     /// the node was forgotten) and release the shared browse if it was the last.
     fn cancel_pending_resolve(&mut self, node_id: u64) {
@@ -3740,8 +3875,9 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// Called from the timer arm, so [`RESOLVE_POLL_INTERVAL`] is the resolve's
     /// polling interval (the inline resolve it replaces polled every 100 ms), and once
     /// from [`Self::spawn_connect`] so an already-known record connects at once.
-    /// Returns immediately when nothing is parked — an idle controller pays
-    /// nothing.
+    /// Returns immediately when nothing is parked and the resubscribe watch
+    /// holds no browse — an idle controller pays nothing. With only the watch
+    /// held it drains the subtype browse every [`ADVERT_WATCH_POLL_INTERVAL`].
     /// Open the base-type `_matter._tcp` fallback browse if its deadline has
     /// come and it is not open already — the delayed half of the #113 fix.
     ///
@@ -3790,11 +3926,18 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
 
     fn drive_pending_resolves(&mut self) {
         // Re-arm the polling tick FIRST, before any early return: the loop only
-        // consults it while entries are parked, and arming it unconditionally
-        // means no path can leave a due-in-the-past anchor behind that would
-        // spin the fairness guard.
-        self.next_resolve_poll = Instant::now() + RESOLVE_POLL_INTERVAL;
-        if self.pending_resolves.is_empty() {
+        // consults it while entries are parked or the resubscribe watch holds
+        // the subtype browse, and arming it unconditionally means no path can
+        // leave a due-in-the-past anchor behind that would spin the fairness
+        // guard. A parked resolve is polled briskly; the watch alone, which only
+        // waits for a device to re-announce, at the slower cadence.
+        let interval = if self.pending_resolves.is_empty() {
+            ADVERT_WATCH_POLL_INTERVAL
+        } else {
+            RESOLVE_POLL_INTERVAL
+        };
+        self.next_resolve_poll = Instant::now() + interval;
+        if self.pending_resolves.is_empty() && self.resolve_query_fabric.is_none() {
             return;
         }
         self.open_base_fallback_if_due();
@@ -3814,16 +3957,18 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         if browses.is_empty() {
             return;
         }
-        tracing::debug!(
-            target: "matter_controller::actor",
-            parked = ?self
-                .pending_resolves
-                .iter()
-                .map(|pr| pr.target.as_str())
-                .collect::<Vec<_>>(),
-            cached = self.seen_records.len(),
-            "settling parked operational resolves",
-        );
+        if !self.pending_resolves.is_empty() {
+            tracing::debug!(
+                target: "matter_controller::actor",
+                parked = ?self
+                    .pending_resolves
+                    .iter()
+                    .map(|pr| pr.target.as_str())
+                    .collect::<Vec<_>>(),
+                cached = self.seen_records.len(),
+                "settling parked operational resolves",
+            );
+        }
         let now = Instant::now();
         for (source, handle) in &browses {
             let services = self.discovery.poll_results(*handle);
@@ -18618,5 +18763,383 @@ mod tests {
             .resubscribes
             .iter()
             .all(|pr| pr.attempt_at > Instant::now()));
+    }
+
+    /// An operational record for `instance_name` at 127.0.0.1:5540.
+    fn op_record(instance_name: &str) -> MatterService {
+        MatterService::new(
+            instance_name.to_string(),
+            ServiceKind::Operational,
+            vec!["127.0.0.1".parse().unwrap()],
+            5540,
+            std::collections::HashMap::new(),
+        )
+    }
+
+    /// Spec test 8 (open): the watch opens the SUBTYPE browse — never the
+    /// base type, never the base fallback — once an episode exists with
+    /// nothing parked, and records the fabric it was opened for.
+    #[tokio::test]
+    async fn watch_opens_only_the_subtype_browse_when_an_episode_begins() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(
+            state.lock().unwrap().subtype_opens,
+            0,
+            "no episode, no watch"
+        );
+
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        {
+            let s = state.lock().unwrap();
+            assert_eq!(s.subtype_opens, 1);
+            assert_eq!(s.base_opens, 0, "the watch never opens the base type");
+        }
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+        assert_eq!(
+            actor.resolve_query_fabric_cfid,
+            Some(actor.sole_compressed_fabric_id().unwrap())
+        );
+        assert!(
+            actor.resolve_base_after.is_none(),
+            "the watch never arms the fallback"
+        );
+
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(
+            state.lock().unwrap().subtype_opens,
+            1,
+            "a held watch is not reopened"
+        );
+    }
+
+    /// Spec test 8 (stay open): through an attempt in flight, its failure, and
+    /// a connect that parks — which reuses the held handle — and whose resolve
+    /// completing does not close it.
+    #[tokio::test]
+    async fn watch_stays_open_across_in_flight_and_connecting_attempts() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let sid = {
+            use matter_crypto::pase::PaseSessionKeys;
+            let keys = PaseSessionKeys {
+                ke: [0u8; 16],
+                i2r_key: [1u8; 16],
+                r2i_key: [2u8; 16],
+                attestation_key: [3u8; 16],
+            };
+            actor.sessions.register_pase(
+                keys,
+                SessionRole::Initiator,
+                1,
+                matter_transport::PeerHint::default(),
+            )
+        };
+        actor.cache.insert(
+            (fabric_id, WATCH_NODE_A),
+            CachedSession {
+                session_id: sid,
+                peer: "127.0.0.1:5540".parse().unwrap(),
+            },
+        );
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+
+        // The attempt fires on the cached session: in flight.
+        actor.resubscribes[0].attempt_at = just_past();
+        actor.drive_resubscribes().await;
+        assert_eq!(actor.pending.len(), 1, "a SubscribeRequest is in flight");
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert!(state.lock().unwrap().stops.is_empty());
+
+        // It times out (the route is gone too), comes back to the queue, fires
+        // again and parks behind a connect, which reuses the held subtype.
+        actor.cache.clear();
+        let key = *actor.pending.keys().next().unwrap();
+        actor
+            .on_pending_timeout(key.0, key.1, PendingTimeoutCause::MrpExpired)
+            .await;
+        actor.resubscribes[0].attempt_at = just_past();
+        actor.drive_resubscribes().await;
+        assert_eq!(actor.pending_resolves.len(), 1, "the connect parked");
+        assert_eq!(
+            state.lock().unwrap().subtype_opens,
+            1,
+            "the held handle is reused"
+        );
+        actor.reconcile_resubscribe_watch(Instant::now());
+
+        // The device's record lands: the resolve completes (the handshake task
+        // is spawned) and the watch keeps the browse. Nothing answers that CASE
+        // task; it is dropped with the test runtime, which is expected.
+        state
+            .lock()
+            .unwrap()
+            .subtype_records
+            .push(op_record(&operational_instance_name(cfid, WATCH_NODE_A)));
+        actor.drive_pending_resolves();
+        assert!(actor.pending_resolves.is_empty());
+        actor.reconcile_resubscribe_watch(Instant::now());
+        let s = state.lock().unwrap();
+        // The parked connect may legitimately have opened (and then released)
+        // the base fallback if this machine took longer than the test-build
+        // SUBTYPE_ONLY_WINDOW; only the subtype handle matters here.
+        assert!(
+            !s.stops.contains(&WATCH_SUBTYPE_HANDLE),
+            "nothing closed the watch: {:?}",
+            s.stops
+        );
+        assert_eq!(s.subtype_opens, 1);
+        drop(s);
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+    }
+
+    /// Spec test 8 (close on Established).
+    #[tokio::test]
+    async fn watch_closes_once_the_episode_is_established() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (SessionId(7), 0x21), pr, far_future());
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+
+        actor
+            .resolve_subscribe(
+                SessionId(7),
+                0x21,
+                OP_SUBSCRIBE_RESPONSE,
+                build_subscribe_response(0x55, 30),
+            )
+            .await;
+        assert!(
+            actor.subscriptions.contains_key(&SubId(1)),
+            "re-established"
+        );
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(state.lock().unwrap().stops, vec![WATCH_SUBTYPE_HANDLE]);
+        assert_eq!(actor.resolve_query_fabric, None);
+        assert_eq!(actor.resolve_query_fabric_cfid, None);
+    }
+
+    /// Spec test 8 (close when the waiting consumer is gone).
+    #[tokio::test]
+    async fn watch_closes_when_the_waiting_consumer_is_gone() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, report_rx, ctrl_rx) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        drop(report_rx);
+        drop(ctrl_rx);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(state.lock().unwrap().stops, vec![WATCH_SUBTYPE_HANDLE]);
+    }
+
+    /// Spec test 8 (close when the node is forgotten).
+    #[tokio::test]
+    async fn watch_closes_when_the_node_is_forgotten() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        let (reply, rx) = oneshot::channel();
+        actor
+            .dispatch_ready(Command::ForgetNode {
+                node_id: WATCH_NODE_A,
+                reply,
+            })
+            .await;
+        let _ = rx.await.unwrap();
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(state.lock().unwrap().stops, vec![WATCH_SUBTYPE_HANDLE]);
+    }
+
+    /// Spec test 16: a subtype browse opened by `spawn_connect` (where most
+    /// episodes' first cache-miss connect opens it) carries its cfid, so the
+    /// reconcile step keeps it instead of closing and reopening it — every
+    /// reopen would re-flush found events.
+    #[tokio::test]
+    async fn a_subtype_opened_by_spawn_connect_is_kept_not_reopened() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 2, Instant::now());
+        actor.enqueue_connect_waiter(fabric_id, WATCH_NODE_A, ConnectWaiter::Resubscribe(pr));
+        assert_eq!(state.lock().unwrap().subtype_opens, 1);
+        actor.fail_connect_waiters(WATCH_NODE_A, &Error::Operational("resolve expired".into()));
+        assert!(actor.pending_resolves.is_empty());
+        assert_eq!(actor.resubscribes.len(), 1);
+        for _ in 0..3 {
+            actor.reconcile_resubscribe_watch(Instant::now());
+        }
+        let s = state.lock().unwrap();
+        assert_eq!(s.subtype_opens, 1, "kept, not closed and reopened");
+        assert!(s.stops.is_empty(), "{:?}", s.stops);
+    }
+
+    /// Spec test 11: failing opens are retried no more often than
+    /// `WATCH_OPEN_RETRY`, and a later success clears the retry.
+    #[tokio::test]
+    async fn a_failing_watch_open_is_retried_no_more_often_than_watch_open_retry() {
+        let (discovery, state) = watch_discovery();
+        state.lock().unwrap().fail_opens = true;
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        let t0 = Instant::now();
+        actor.reconcile_resubscribe_watch(t0);
+        assert_eq!(state.lock().unwrap().subtype_opens, 1);
+        actor.reconcile_resubscribe_watch(t0 + Duration::from_secs(1));
+        actor.reconcile_resubscribe_watch(
+            t0 + WATCH_OPEN_RETRY.saturating_sub(Duration::from_millis(1)),
+        );
+        assert_eq!(
+            state.lock().unwrap().subtype_opens,
+            1,
+            "no retry inside the interval"
+        );
+        actor.reconcile_resubscribe_watch(t0 + WATCH_OPEN_RETRY);
+        assert_eq!(state.lock().unwrap().subtype_opens, 2);
+
+        state.lock().unwrap().fail_opens = false;
+        actor.reconcile_resubscribe_watch(t0 + WATCH_OPEN_RETRY * 2);
+        assert_eq!(state.lock().unwrap().subtype_opens, 3);
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+        assert!(actor.watch_open_retry_at.is_none());
+    }
+
+    /// Spec test 12: with only the watch open the loop wakes within ~1 s to
+    /// drain it; with nothing pending the deadline is unchanged.
+    #[tokio::test]
+    async fn the_watch_alone_wakes_the_loop_about_once_a_second() {
+        let (discovery, _state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        assert_eq!(actor.next_timer_deadline(), None, "nothing pending");
+        let attempt_at = far_future();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, attempt_at);
+        actor.resubscribes.push(pr);
+        assert_eq!(
+            actor.next_timer_deadline(),
+            Some(attempt_at),
+            "no watch yet"
+        );
+        actor.reconcile_resubscribe_watch(Instant::now());
+        actor.drive_pending_resolves();
+        let deadline = actor.next_timer_deadline().expect("armed");
+        assert!(
+            deadline <= Instant::now() + ADVERT_WATCH_POLL_INTERVAL,
+            "the watch must be drained about once a second"
+        );
+    }
+
+    /// Spec §4.6 / review focus 1: a failed-open retry counts toward the
+    /// deadline only while it is in the future AND could happen. A past-due or
+    /// impossible one (no sole fabric) would spin the overdue guard.
+    #[tokio::test]
+    async fn a_watch_open_retry_counts_only_while_it_can_still_happen() {
+        let (discovery, state) = watch_discovery();
+        state.lock().unwrap().fail_opens = true;
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let attempt_at = far_future();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, attempt_at);
+        actor.resubscribes.push(pr);
+        let t0 = Instant::now();
+        actor.reconcile_resubscribe_watch(t0);
+        assert_eq!(actor.next_timer_deadline(), Some(t0 + WATCH_OPEN_RETRY));
+
+        actor.watch_open_retry_at = Some(just_past());
+        assert_eq!(
+            actor.next_timer_deadline(),
+            Some(attempt_at),
+            "past-due never counts"
+        );
+
+        actor.watch_open_retry_at = Some(Instant::now() + WATCH_OPEN_RETRY);
+        actor.state.fabrics.clear();
+        assert_eq!(
+            actor.next_timer_deadline(),
+            Some(attempt_at),
+            "no sole fabric: the retry cannot happen, so it must not wake the loop"
+        );
+    }
+
+    /// Review focus 1: a held watch whose fabric is no longer the sole one is
+    /// closed (nothing parked) and reopened for the current fabric next pass;
+    /// with no sole fabric at all it stays closed.
+    #[tokio::test]
+    async fn watch_follows_a_fabric_change() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        actor.resolve_query_fabric_cfid = Some([0xEE; 8]); // opened for another fabric
+
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(state.lock().unwrap().stops, vec![WATCH_SUBTYPE_HANDLE]);
+        assert_eq!(actor.resolve_query_fabric, None);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(state.lock().unwrap().subtype_opens, 2, "reopened");
+        assert_eq!(
+            actor.resolve_query_fabric_cfid,
+            Some(actor.sole_compressed_fabric_id().unwrap())
+        );
+
+        actor.state.fabrics.clear();
+        actor.reconcile_resubscribe_watch(Instant::now());
+        actor.reconcile_resubscribe_watch(Instant::now());
+        let s = state.lock().unwrap();
+        assert_eq!(s.stops.len(), 2, "closed");
+        assert_eq!(s.subtype_opens, 2, "and not reopened without a sole fabric");
+    }
+
+    /// #113 guard: the watch never opens the subtype browse beside a live
+    /// base-type browse; it opens once the base browse is gone.
+    #[tokio::test]
+    async fn watch_never_opens_the_subtype_beside_a_live_base_browse() {
+        let (discovery, state) = watch_discovery();
+        state.lock().unwrap().fail_subtype_opens = true;
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let (queued, _queued_reports, _queued_ctrl) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(queued);
+        // B's connect cannot open the subtype, so `spawn_connect` opens the
+        // base type at once and parks on it.
+        let (connecting, _connecting_reports, _connecting_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(
+            fabric_id,
+            WATCH_NODE_B,
+            ConnectWaiter::Resubscribe(connecting),
+        );
+        assert_eq!(actor.resolve_query, Some(WATCH_BASE_HANDLE));
+        assert_eq!(actor.resolve_query_fabric, None);
+
+        // The daemon would now accept a subtype browse — but the base one is live.
+        state.lock().unwrap().fail_subtype_opens = false;
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(
+            state.lock().unwrap().subtype_opens,
+            1,
+            "only spawn_connect's failed try"
+        );
+        assert_eq!(actor.resolve_query_fabric, None);
+        assert!(actor.watch_open_retry_at.is_none(), "deferred, not failed");
+
+        // B's resolve ends; the base browse goes; the watch opens.
+        actor.cancel_pending_resolve(WATCH_NODE_B);
+        assert_eq!(actor.resolve_query, None);
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(state.lock().unwrap().subtype_opens, 2);
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
     }
 }
