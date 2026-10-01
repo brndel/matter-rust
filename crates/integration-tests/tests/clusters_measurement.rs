@@ -130,7 +130,12 @@ async fn illuminance_measurement_typed_decode() {
     );
 }
 
-/// PressureMeasurement (0x0403): MeasuredValue decodes Ok; Min==0, Max==32767.
+/// PressureMeasurement (0x0403): MeasuredValue and MaxMeasuredValue decode Ok;
+/// Min==0.
+///
+/// MaxMeasuredValue is checked for a successful typed decode only, not a value:
+/// it is the DUT's configured default, and all-clusters-app ships 0 in
+/// connectedhomeip v1.4.2.0 (the nightly's pin) but 32767 on later `master`.
 #[tokio::test]
 async fn pressure_measurement_typed_decode() {
     let cfg = integration_tests::dut_or_skip!();
@@ -153,11 +158,9 @@ async fn pressure_measurement_typed_decode() {
         "Pressure.MinMeasuredValue != 0"
     );
     let max = read_attr(&node, 1, C, ATTR_MAX_MEASURED_VALUE).await;
-    assert_eq!(
-        pressure_measurement::decode_max_measured_value(&value_to_tlv(&max))
-            .expect("decode Pressure.Max"),
-        Nullable::Value(32767),
-        "Pressure.MaxMeasuredValue != 32767"
+    assert!(
+        pressure_measurement::decode_max_measured_value(&value_to_tlv(&max)).is_ok(),
+        "Pressure.MaxMeasuredValue typed-decode failed: {max:?}"
     );
 }
 
