@@ -23238,4 +23238,366 @@ mod tests {
         );
         assert!(w.actor.sessions.get(arriving).is_some());
     }
+
+    /// Answer a `SubscribeRequest` on `exchange_id` as a device does: a priming
+    /// report (`OnOff = true`), then a `SubscribeResponse` with `wire_sub_id`
+    /// and `max_interval`.
+    async fn answer_subscribe_request(
+        io: &InMemoryDatagram,
+        ctrl_addr: SocketAddr,
+        sessions: &mut SessionManager,
+        sid: SessionId,
+        exchange_id: u16,
+        wire_sub_id: u32,
+        max_interval: u16,
+    ) {
+        for (opcode, payload) in [
+            (
+                OP_REPORT_DATA,
+                build_report_data(1, 0x06, 0x0000, &matter_codec::Value::Bool(true)),
+            ),
+            (
+                OP_SUBSCRIBE_RESPONSE,
+                build_subscribe_response(wire_sub_id, max_interval),
+            ),
+        ] {
+            let out = sessions
+                .encode_outbound(
+                    sid,
+                    Some(exchange_id),
+                    opcode,
+                    ProtocolId::INTERACTION_MODEL,
+                    &payload,
+                    MrpFlags { reliable: false },
+                    Instant::now(),
+                )
+                .unwrap();
+            io.send_to(&out.wire_bytes, ctrl_addr).await.unwrap();
+        }
+    }
+
+    /// The device for the sibling end-to-end test (spec test 8). It models the
+    /// publisher rule the test is about, Matter 1.4 §8.5: a `SubscribeRequest`
+    /// with `KeepSubscriptions = false` terminates every other subscription
+    /// this subscriber holds here.
+    ///
+    /// - The 1st request (A) gets max interval 0 and no reports, so its
+    ///   liveness trips after `LIVENESS_GRACE`.
+    /// - The 2nd request (B) gets max interval 60 and id `0x1234_5678` (the id
+    ///   `build_report_data` carries). While B is alive the device sends it a
+    ///   report every 500 ms on B's session, the first one.
+    /// - A's liveness retry runs a fresh CASE handshake (spec §4.6), accepted
+    ///   with `second_life`; its request (the 3rd) gets max interval 60. From
+    ///   then on B's reports carry `OnOff = false` instead of `true`, so the
+    ///   test can tell a report sent after A's resubscribe.
+    #[allow(clippy::too_many_lines)] // one device script: two handshakes, three subscribes, a report loop
+    async fn run_sibling_subscriptions_device(
+        io: InMemoryDatagram,
+        ctrl_addr: SocketAddr,
+        first_life: (CaseCredentials, TrustedRoots),
+        second_life: (CaseCredentials, TrustedRoots),
+    ) {
+        let Some(sigma1) = recv_sigma1(&io).await else {
+            return;
+        };
+        let (creds, roots) = first_life;
+        let (mut first, first_sid) =
+            accept_case_from(&io, ctrl_addr, creds, roots, 0x00D2, &sigma1).await;
+        let mut second: Option<(SessionManager, SessionId)> = None;
+        let mut second_life = Some(second_life);
+        let mut requests = 0u32;
+        let mut b_alive = false;
+        let mut a_resubscribed = false;
+        let give_up = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_report = tokio::time::Instant::now() + Duration::from_millis(500);
+        while tokio::time::Instant::now() < give_up {
+            if let Ok(Ok((wire, _))) = tokio::time::timeout_at(next_report, io.recv_from()).await {
+                if wire.len() >= 3 && wire[1] == 0 && wire[2] == 0 {
+                    // Unsecured: A's liveness retry opening a fresh CASE session.
+                    let is_sigma1 = matches!(decode_unsecured(&wire), Ok(m) if m.opcode == 0x30);
+                    if is_sigma1 {
+                        if let Some((creds, roots)) = second_life.take() {
+                            second = Some(
+                                accept_case_from(&io, ctrl_addr, creds, roots, 0x00D3, &wire).await,
+                            );
+                        }
+                    }
+                } else {
+                    let now = Instant::now();
+                    let decoded = match first.decode_inbound(&wire, now) {
+                        Ok(d) => Some((d, true)),
+                        Err(_) => second
+                            .as_mut()
+                            .and_then(|(s, _)| s.decode_inbound(&wire, now).ok())
+                            .map(|d| (d, false)),
+                    };
+                    if let Some((
+                        DecodeInboundOutput::AppMessage {
+                            exchange_id,
+                            opcode: 0x03,
+                            payload,
+                            ..
+                        },
+                        on_first,
+                    )) = decoded
+                    {
+                        requests += 1;
+                        // Matter 1.4 §8.5: KeepSubscriptions=false terminates
+                        // every other subscription this subscriber holds here.
+                        if !keep_flag(&payload) {
+                            b_alive = false;
+                        }
+                        let (wire_sub_id, max_interval) = match requests {
+                            1 => (0x1111_1111, 0),
+                            2 => (0x1234_5678, 60),
+                            _ => (0x2222_2222, 60),
+                        };
+                        if on_first {
+                            answer_subscribe_request(
+                                &io,
+                                ctrl_addr,
+                                &mut first,
+                                first_sid,
+                                exchange_id,
+                                wire_sub_id,
+                                max_interval,
+                            )
+                            .await;
+                        } else if let Some((sessions, sid)) = second.as_mut() {
+                            answer_subscribe_request(
+                                &io,
+                                ctrl_addr,
+                                sessions,
+                                *sid,
+                                exchange_id,
+                                wire_sub_id,
+                                max_interval,
+                            )
+                            .await;
+                        }
+                        if requests == 2 {
+                            b_alive = true;
+                        }
+                        if requests >= 3 {
+                            a_resubscribed = true;
+                        }
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= next_report {
+                next_report += Duration::from_millis(500);
+                if b_alive {
+                    let report = build_report_data(
+                        1,
+                        0x06,
+                        0x0000,
+                        &matter_codec::Value::Bool(!a_resubscribed),
+                    );
+                    let out = first
+                        .encode_outbound(
+                            first_sid,
+                            None,
+                            OP_REPORT_DATA,
+                            ProtocolId::INTERACTION_MODEL,
+                            &report,
+                            MrpFlags { reliable: false },
+                            Instant::now(),
+                        )
+                        .unwrap();
+                    io.send_to(&out.wire_bytes, ctrl_addr).await.unwrap();
+                }
+            }
+        }
+        keep_endpoint_open(io);
+    }
+
+    /// Spec test 8 (D0 at the wire): two subscriptions to one node; one goes
+    /// through a resubscribe (liveness, then a fresh CASE session); the other
+    /// must keep receiving reports afterwards — the device would have
+    /// terminated it had any request said `KeepSubscriptions = false`.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // one linear scenario: two subscribes, a resubscribe, a report
+    async fn sibling_subscriptions_survive_each_others_resubscribe() {
+        let Harness {
+            store,
+            ctrl_io,
+            dev_io,
+            ctrl_addr,
+            discovery,
+            device_creds,
+            device_roots,
+            device_node_id,
+        } = loopback_harness();
+        let state = crate::snapshot::deserialize(&store.load().unwrap().unwrap()).unwrap();
+        let second_life = mint_device_creds(&state, device_node_id);
+        let device = tokio::spawn(run_sibling_subscriptions_device(
+            dev_io,
+            ctrl_addr,
+            (device_creds, device_roots),
+            second_life,
+        ));
+        let controller = crate::controller::MatterController::with_components(
+            store,
+            ctrl_io,
+            discovery,
+            Arc::new(SystemNocRng),
+            None,
+            crate::builder::DEFAULT_ADMIN_VENDOR_ID,
+        )
+        .expect("open");
+        let node = controller.node(device_node_id);
+        let path = [matter_interaction::ReadPath::concrete(1, 0x06, 0x0000)];
+
+        let mut sub_a =
+            tokio::time::timeout(Duration::from_secs(10), node.subscribe(&path, &[], 1, 0))
+                .await
+                .expect("A must not hang")
+                .expect("A");
+        let mut sub_b =
+            tokio::time::timeout(Duration::from_secs(10), node.subscribe(&path, &[], 1, 60))
+                .await
+                .expect("B must not hang")
+                .expect("B");
+
+        // A goes silent: Resubscribing, then Established again.
+        let a_resubscribed = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut lost = false;
+            loop {
+                match sub_a.next().await {
+                    Some(SubscriptionEvent::Resubscribing { .. }) => lost = true,
+                    Some(SubscriptionEvent::Established { .. }) if lost => return true,
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        assert!(
+            matches!(a_resubscribed, Ok(true)),
+            "A must go through a resubscribe (got {a_resubscribed:?})"
+        );
+
+        // B must still be alive on the device: a report sent after A's
+        // resubscribe carries OnOff = false.
+        let b_alive = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match sub_b.next().await {
+                    Some(SubscriptionEvent::Report(r))
+                        if r.value == matter_codec::Value::Bool(false) =>
+                    {
+                        return true;
+                    }
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        assert!(
+            matches!(b_alive, Ok(true)),
+            "B must keep receiving reports after A's resubscribe (got {b_alive:?})"
+        );
+
+        sub_a.cancel().await.ok();
+        sub_b.cancel().await.ok();
+        device.abort();
+    }
+
+    /// Device that accepts CASE and answers the first `SubscribeRequest` with
+    /// `StatusResponse(0x89)` — `ResourceExhausted`, its subscription resources
+    /// full.
+    async fn run_rejecting_subscribe_device(
+        io: InMemoryDatagram,
+        ctrl_addr: SocketAddr,
+        creds: CaseCredentials,
+        roots: TrustedRoots,
+    ) {
+        let Some(sigma1) = recv_sigma1(&io).await else {
+            return;
+        };
+        let (mut sessions, sid) =
+            accept_case_from(&io, ctrl_addr, creds, roots, 0x00D2, &sigma1).await;
+        loop {
+            let Ok(Ok((wire, _))) =
+                tokio::time::timeout(Duration::from_secs(30), io.recv_from()).await
+            else {
+                break;
+            };
+            let Ok(DecodeInboundOutput::AppMessage {
+                exchange_id,
+                opcode: 0x03,
+                ..
+            }) = sessions.decode_inbound(&wire, Instant::now())
+            else {
+                continue;
+            };
+            let status = matter_interaction::build_status_response(0x89);
+            let out = sessions
+                .encode_outbound(
+                    sid,
+                    Some(exchange_id),
+                    OP_STATUS_RESPONSE,
+                    ProtocolId::INTERACTION_MODEL,
+                    &status,
+                    MrpFlags { reliable: false },
+                    Instant::now(),
+                )
+                .unwrap();
+            io.send_to(&out.wire_bytes, ctrl_addr).await.unwrap();
+            break;
+        }
+        keep_endpoint_open(io);
+    }
+
+    /// Spec test 8 (D2 at the wire): a device that rejects the first subscribe
+    /// fails it with `SubscribeRejected(0x89)` well under the 30 s response
+    /// deadline.
+    #[tokio::test]
+    async fn a_rejected_first_subscribe_fails_fast_with_the_device_status() {
+        let Harness {
+            store,
+            ctrl_io,
+            dev_io,
+            ctrl_addr,
+            discovery,
+            device_creds,
+            device_roots,
+            device_node_id,
+        } = loopback_harness();
+        let device = tokio::spawn(run_rejecting_subscribe_device(
+            dev_io,
+            ctrl_addr,
+            device_creds,
+            device_roots,
+        ));
+        let controller = crate::controller::MatterController::with_components(
+            store,
+            ctrl_io,
+            discovery,
+            Arc::new(SystemNocRng),
+            None,
+            crate::builder::DEFAULT_ADMIN_VENDOR_ID,
+        )
+        .expect("open");
+
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            controller.node(device_node_id).subscribe(
+                &[matter_interaction::ReadPath::concrete(1, 0x06, 0x0000)],
+                &[],
+                1,
+                30,
+            ),
+        )
+        .await
+        .expect("a rejected subscribe must not wait out the 30 s response deadline");
+        match result {
+            Err(Error::SubscribeRejected(status)) => assert_eq!(status, 0x89),
+            Err(e) => panic!("expected SubscribeRejected(0x89), got {e}"),
+            Ok(_) => panic!("the device rejected the subscribe; it must not be established"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let _ = tokio::time::timeout(Duration::from_secs(5), device).await;
+    }
 }
