@@ -22,6 +22,102 @@ From `0.1.0` onward the headings mean what they say, and
 while a crate is `0.x`, a **breaking change bumps the minor version** — these
 APIs have had no outside users yet and are expected to move.
 
+## matter-controller 0.17.0
+
+Subscriptions are sturdier in five situations that all occur in normal use:
+several subscriptions to one node, a device that rejects or garbles a
+subscribe, a subscription cancelled while it is (re)connecting, reports for a
+subscription the controller no longer holds, and a liveness timeout.
+
+A minor release for one new `Error` variant (additive: `Error` is
+`#[non_exhaustive]`) and behaviour fixes. No other crate changes and nothing
+else is re-released. On the wire, `SubscribeRequest`s now set
+`KeepSubscriptions` when they should, the controller now answers messages it
+used to ignore, and a liveness timeout now reconnects with a fresh CASE
+handshake (all below).
+
+### Added — `Error::SubscribeRejected(u8)`
+
+The device answered a subscribe request with a non-success Interaction Model
+status, preserved raw: for example `0x89` `ResourceExhausted` when its
+subscription resources are full, or `0xC8` `PathsExhausted` when a path quota
+is exceeded.
+
+### Changed — a rejected first subscribe fails at once
+
+`Node::subscribe` against a device that rejects the request used to return
+`Error::ResponseTimeout` after the 30 s response deadline. It now returns
+`Error::SubscribeRejected(status)` as soon as the rejection arrives. If you
+matched `ResponseTimeout` to detect a device that is out of subscription
+slots, match `SubscribeRejected(0x89)` instead. A subscription that is already
+established and is rejected while re-establishing itself still retries on its
+backoff, as chip does; the rejection shows only in the `debug` log.
+
+### Fixed
+
+- **Several subscriptions to one node no longer tear each other down.** Every
+  `SubscribeRequest` asked the device to drop this controller's other
+  subscriptions (`KeepSubscriptions = false`), which a device must honour
+  (Matter 1.4 §8.5). A second subscription to a node killed the first, and
+  every automatic resubscribe killed its siblings, which then went quiet until
+  their own liveness timeout and resubscribed in turn. **If you hold more than
+  one subscription per node**, this was happening to you: those subscriptions
+  now stay up. A subscription that is alone still asks the device to clear old
+  ones, so subscriptions left over from an earlier run of your process are
+  still cleaned up.
+- **A malformed, rejected or unexpected answer no longer derails a
+  subscription.** A resubscribe whose `SubscribeResponse` did not parse used to
+  end the stream (`None`) with no cause; it is now retried on its backoff. A
+  priming report that did not parse used to be acknowledged and skipped,
+  establishing the subscription on an incomplete snapshot; it now fails the
+  attempt. A `StatusResponse` to a resubscribe used to be ignored until the
+  30 s deadline, after which the node's session was torn down under any other
+  subscriptions and requests using it; it is now retried at once on the backoff
+  and the session is left alone. Each such message is answered with
+  `StatusResponse(InvalidAction)` (`0x80`).
+- **Cancelling or dropping a `Subscription` mid-reconnect really cancels it.**
+  A retry already on the wire or waiting for a connection could still go out,
+  re-create a subscription on the device, and (with the bug above) tear down
+  your other subscriptions. Cancel now stops it, including its retransmissions.
+- **Reports for subscriptions we no longer hold are answered.** The device is
+  told `InvalidSubscription` (`0x7D`) and drops that subscription at once,
+  instead of reporting into the void until it times out. A report that does not
+  parse, or carries no subscription id, is answered `InvalidAction` (`0x80`). A
+  report for a live subscription that the device sends on a different session
+  to us is now delivered (it used to be dropped).
+- **Faster recovery after a liveness timeout.** When a subscription went
+  quiet, its first retry went out on the very session that had gone quiet,
+  spending about 6 s of retransmissions (or 30 s) before reconnecting. It now
+  reconnects at once with a fresh CASE session (session resumption keeps that
+  cheap), as chip does. The old session stays for whatever else still uses it
+  and is dropped once nothing does.
+- **A timed-out resubscribe no longer takes the session with it.** When a
+  resubscribe attempt timed out, the node's session was removed along with its
+  route, under any sibling subscriptions and in-flight requests still using it.
+  Now only the route is dropped, so the next attempt runs a fresh CASE
+  handshake while everything else keeps the session. After any such route-only
+  drop (here, after a liveness timeout, and after a request times out), and
+  when a subscription moves to another session, the old session is removed as
+  soon as no route, subscription or request in flight refers to it, so stale
+  sessions no longer accumulate in the session table.
+
+Two consequences of matching chip, both deliberate:
+
+- A report that reaches us before the retransmission of a lost
+  `SubscribeResponse` is for a subscription we do not hold yet, so it is now
+  answered `InvalidSubscription` and the device drops that new subscription. It
+  recovers through its liveness timeout and resubscribes.
+- A message on a subscribe exchange that is not an Interaction Model message is
+  ignored whatever its opcode. Before, a non-IM message with opcode `0x04` or
+  `0x05` was taken for a `SubscribeResponse` or a priming report.
+
+### Documented — one controller process per operational identity
+
+The device scopes "drop this subscriber's other subscriptions" to the fabric
+and the controller's node id — its operational identity — not to the process.
+Run one controller process per operational identity (NOC); two processes
+sharing one would terminate each other's subscriptions. See `Node::subscribe`.
+
 ## matter-transport 0.7.2 + matter-controller 0.16.0
 
 For most Wi-Fi and Ethernet devices, a subscription whose device dropped off
