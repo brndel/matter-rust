@@ -85,8 +85,8 @@ pub enum Error {
 
     /// The device rejected a subscribe request with an Interaction Model status
     /// code (e.g. 0x89 `ResourceExhausted` when its subscription resources are
-    /// full, 0xCB-range path quotas, 0x80 `InvalidAction`, 0x7E
-    /// `UnsupportedAccess`). Raw status preserved.
+    /// full, 0xC8 `PathsExhausted` when a path quota is exceeded, 0x80
+    /// `InvalidAction`, 0x7E `UnsupportedAccess`). Raw status preserved.
     ///
     /// Returned by [`Node::subscribe`](crate::Node::subscribe) as soon as the
     /// rejection arrives. A subscription that is already established and is

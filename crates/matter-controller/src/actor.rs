@@ -21781,6 +21781,10 @@ mod tests {
             ),
             "got {outcome:?}"
         );
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((0x56, IM_STATUS_INVALID_ACTION))
+        );
     }
 
     /// Spec test 3 / §4.2: the subscribe handshake acts only on Interaction
