@@ -4051,6 +4051,67 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         queued.chain(in_flight).chain(connecting)
     }
 
+    /// The `KeepSubscriptions` flag for a `SubscribeRequest` to `node_id`
+    /// (spec §4.1): `true` iff this controller holds **another** subscription
+    /// to the node — any but `excluding` — that is
+    ///
+    /// - established (`subscriptions`), its consumer still listening;
+    /// - in a resubscribe episode ([`Self::resubscribe_episode_entries`]:
+    ///   queued, in flight, or connecting), its consumer still listening;
+    /// - an initial subscribe still pending (a `Subscribe` pending whose reply
+    ///   channel is open — a caller that gave up does not count);
+    /// - an initial subscribe parked for re-send after MRP exhaustion
+    ///   (`ConnectWaiter::ResendPending`), its reply channel still open:
+    ///   exhaustion does not prove the device never received it.
+    ///
+    /// A parked `Command::Subscribe` does not count: it has not been sent, and
+    /// computes its own flag when it is.
+    ///
+    /// Matter 1.4 §8.5: with `KeepSubscriptions = false` the publisher
+    /// terminates every other subscription of this subscriber. So a lone
+    /// subscription (the first after a restart) still clears what an earlier
+    /// process left on the device, while siblings never terminate each other.
+    /// The device scopes that to (fabric, subscriber node id); with one sole
+    /// fabric the node id alone identifies it — hence the documented
+    /// assumption of one controller process per operational identity.
+    ///
+    /// Two known gaps, both benign and documented rather than solved:
+    /// `handle_connect_done` takes a node's whole waiter list before resuming
+    /// it, so siblings resumed in that one pass do not see each other — they
+    /// are sent in order, so an earlier `false` reaches the device before the
+    /// later sibling exists there. And if a first `false` transmission is lost
+    /// and a sibling's `true` arrives first, the first one's MRP retransmission
+    /// terminates the sibling, which recovers through its own liveness timeout.
+    fn keep_subscriptions_for(&self, node_id: u64, excluding: Option<SubId>) -> bool {
+        let other = |sub_id: SubId| excluding != Some(sub_id);
+        let established = self
+            .subscriptions
+            .iter()
+            .any(|(id, e)| e.node_id == node_id && other(*id) && !e.tx.consumer_gone());
+        let in_episode = self
+            .resubscribe_episode_entries()
+            .any(|(id, n, tx)| n == node_id && other(id) && !tx.consumer_gone());
+        let initial_pending = self.pending.values().any(|p| {
+            matches!(
+                &p.reply,
+                PendingReply::Subscribe { sub_id, reply: Some(reply), node_id: n, .. }
+                    if *n == node_id && other(*sub_id) && !reply.is_closed()
+            )
+        });
+        let initial_parked = self.pending_connects.get(&node_id).is_some_and(|waiters| {
+            waiters.iter().any(|w| {
+                matches!(
+                    w,
+                    ConnectWaiter::ResendPending(Pending {
+                        reply: PendingReply::Subscribe { sub_id, reply: Some(reply), .. },
+                        ..
+                    }) if other(*sub_id) && !reply.is_closed()
+                )
+            })
+        });
+        established || in_episode || initial_pending || initial_parked
+    }
+
     /// Whether the resubscribe watch must hold the fabric-subtype browse open:
     /// true while some subscription whose consumer is still listening is in a
     /// resubscribe episode ([`Self::resubscribe_episode_entries`]). An entry
@@ -4824,7 +4885,40 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// [`Self::handle_connect_done`]). Marks it `retried` and discards any
     /// partial read/subscribe accumulation from the first attempt; a send
     /// failure fails the op's caller.
-    async fn resume_resend_pending(&mut self, p: Pending, sid: SessionId, peer: SocketAddr) {
+    ///
+    /// A subscribe is re-encoded, not replayed (spec §4.1): its
+    /// `KeepSubscriptions` is recomputed now — the one baked in at the first
+    /// send may have been `false` with a sibling established since, and
+    /// replaying it would terminate that sibling — and its event filters are
+    /// bumped to the delivery watermark, since priming events from the failed
+    /// first attempt are already in the caller's channel. The new bytes are
+    /// stored back as the request.
+    async fn resume_resend_pending(&mut self, mut p: Pending, sid: SessionId, peer: SocketAddr) {
+        if let PendingReply::Subscribe {
+            sub_id,
+            report_tx,
+            paths,
+            event_paths,
+            event_filters,
+            min_interval,
+            max_interval,
+            ..
+        } = &mut p.reply
+        {
+            let keep_subscriptions = self.keep_subscriptions_for(p.node_id, Some(*sub_id));
+            *event_filters =
+                bump_event_filters(std::mem::take(event_filters), report_tx.max_event_delivered);
+            p.request.payload = matter_interaction::build_subscribe_request(
+                &matter_interaction::SubscribeRequest {
+                    keep_subscriptions,
+                    min_interval_floor: *min_interval,
+                    max_interval_ceiling: *max_interval,
+                    paths: paths.clone(),
+                    event_paths: event_paths.clone(),
+                    event_filters: event_filters.clone(),
+                },
+            );
+        }
         let sent = self
             .send_request(
                 sid,
@@ -4876,7 +4970,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     ) {
         let req =
             matter_interaction::build_subscribe_request(&matter_interaction::SubscribeRequest {
-                keep_subscriptions: false,
+                keep_subscriptions: self.keep_subscriptions_for(pr.node_id, Some(pr.sub_id)),
                 min_interval_floor: pr.min_interval,
                 max_interval_ceiling: pr.max_interval,
                 paths: pr.paths.clone(),
@@ -6219,6 +6313,10 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// report receiver is handed back via `reply` once the `SubscribeResponse`
     /// arrives (see [`Self::resolve_subscribe`]); priming reports that precede it
     /// flow through the same channel.
+    ///
+    /// The request's `KeepSubscriptions` comes from
+    /// [`Self::keep_subscriptions_for`]; `excluding` is `None` because this
+    /// subscription's `SubId` is allocated only once the request is sent.
     // Mirrors the `Command::Subscribe` variant's fields one-for-one; bundling them
     // into a params struct would only move the same set behind one name.
     #[allow(clippy::too_many_arguments)]
@@ -6241,7 +6339,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         };
         let req =
             matter_interaction::build_subscribe_request(&matter_interaction::SubscribeRequest {
-                keep_subscriptions: false,
+                keep_subscriptions: self.keep_subscriptions_for(node_id, None),
                 min_interval_floor: min_interval,
                 max_interval_ceiling: max_interval,
                 paths: paths.clone(),
@@ -21859,5 +21957,269 @@ mod tests {
             .await;
         assert_eq!(queued_state(&w.actor, 1).0, 3, "rescheduled");
         assert!(w.next_sent(NOTHING_SENT_WITHIN).await.is_none());
+    }
+
+    /// The `KeepSubscriptions` flag (context tag 0) of an encoded
+    /// `SubscribeRequest`.
+    fn keep_flag(payload: &[u8]) -> bool {
+        use matter_codec::{Tag, TlvReader, Value};
+        let (_tag, msg) = TlvReader::new(payload).read_value().unwrap();
+        let Value::Structure(members) = msg else {
+            panic!("a SubscribeRequest is a structure");
+        };
+        match members.iter().find(|(t, _)| *t == Tag::Context(0)) {
+            Some((_, Value::Bool(keep))) => *keep,
+            other => panic!("no KeepSubscriptions bool at tag 0: {other:?}"),
+        }
+    }
+
+    /// The `KeepSubscriptions` flag of the `SubscribeRequest` pending for
+    /// `sub_id`.
+    fn pending_keep_flag<D: Discovery>(actor: &Actor<InMemoryDatagram, D>, sub_id: SubId) -> bool {
+        let p = actor
+            .pending
+            .values()
+            .find(|p| matches!(&p.reply, PendingReply::Subscribe { sub_id: s, .. } if *s == sub_id))
+            .expect("a pending subscribe for this subscription");
+        keep_flag(&p.request.payload)
+    }
+
+    /// An established subscription of `node_id` on `session_id`, device id
+    /// `wire_sub_id`, live until `liveness_deadline`.
+    fn test_sub_entry(
+        tx: ReportSink,
+        session_id: SessionId,
+        wire_sub_id: u32,
+        node_id: u64,
+        liveness_deadline: Instant,
+    ) -> SubEntry {
+        SubEntry {
+            tx,
+            peer: "127.0.0.1:5540".parse().unwrap(),
+            reassembler: ReportReassembler::default(),
+            session_id,
+            wire_sub_id,
+            node_id,
+            paths: vec![matter_interaction::ReadPath::all()],
+            event_paths: vec![],
+            event_filters: vec![],
+            min_interval: 1,
+            max_interval: 30,
+            max_interval_ceiling: 30,
+            liveness_deadline,
+        }
+    }
+
+    /// Spec test 1 (D0): a lone subscribe sends `KeepSubscriptions = false`
+    /// (clearing what an earlier process left on the device); a second one to
+    /// the same node, while the first is still pending, sends `true`; another
+    /// node is independent.
+    #[tokio::test]
+    async fn a_lone_subscribe_clears_and_a_second_keeps_the_first() {
+        let mut actor = actor_with_one_fabric();
+        route_to_test_session(&mut actor, 0x42);
+        route_to_test_session(&mut actor, 0x43);
+        let first = SubId(actor.next_sub_id);
+        let (reply_a, _rx_a) = oneshot::channel();
+        actor
+            .start_subscribe(
+                0x42,
+                vec![matter_interaction::ReadPath::all()],
+                vec![],
+                vec![],
+                1,
+                30,
+                reply_a,
+            )
+            .await;
+        assert!(!pending_keep_flag(&actor, first), "alone: clear");
+        let second = SubId(actor.next_sub_id);
+        let (reply_b, _rx_b) = oneshot::channel();
+        actor
+            .start_subscribe(
+                0x42,
+                vec![matter_interaction::ReadPath::all()],
+                vec![],
+                vec![],
+                1,
+                30,
+                reply_b,
+            )
+            .await;
+        assert!(
+            pending_keep_flag(&actor, second),
+            "the first, still pending, must survive the second"
+        );
+        let other = SubId(actor.next_sub_id);
+        let (reply_c, _rx_c) = oneshot::channel();
+        actor
+            .start_subscribe(
+                0x43,
+                vec![matter_interaction::ReadPath::all()],
+                vec![],
+                vec![],
+                1,
+                30,
+                reply_c,
+            )
+            .await;
+        assert!(
+            !pending_keep_flag(&actor, other),
+            "another node's subscriptions do not count"
+        );
+    }
+
+    /// Spec test 1 (D0): a resubscribe keeps a live sibling and clears when
+    /// alone.
+    #[tokio::test]
+    async fn a_resubscribe_keeps_a_live_sibling_and_clears_when_alone() {
+        let mut actor = actor_with_one_fabric();
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let peer: SocketAddr = "127.0.0.1:5540".parse().unwrap();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 0, Instant::now());
+        actor.resume_resubscribe(pr, sid, peer).await;
+        assert!(!pending_keep_flag(&actor, SubId(1)), "alone: clear");
+        actor.pending.clear();
+
+        let (sink, _sibling_reports, _sibling_ctrl) = test_report_sink();
+        actor.insert_subscription(
+            SubId(9),
+            test_sub_entry(sink, sid, 0x99, 0x42, far_future()),
+        );
+        let (pr, _reports2, _ctrl2) = test_pending_resubscribe(1, 0x42, 0, Instant::now());
+        actor.resume_resubscribe(pr, sid, peer).await;
+        assert!(pending_keep_flag(&actor, SubId(1)), "a live sibling: keep");
+    }
+
+    /// Spec test 1 (D0): a sibling whose consumer is gone, an initial subscribe
+    /// whose caller gave up (closed oneshot) — pending or parked for its
+    /// re-send — and a subscribe command still parked behind a connect (never
+    /// sent) do not count.
+    #[tokio::test]
+    async fn dead_or_unsent_siblings_do_not_keep_subscriptions() {
+        let mut actor = actor_with_one_fabric();
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let (sink, gone_reports, gone_ctrl) = test_report_sink();
+        drop(gone_reports);
+        drop(gone_ctrl);
+        actor.insert_subscription(
+            SubId(9),
+            test_sub_entry(sink, sid, 0x99, 0x42, far_future()),
+        );
+        assert!(!actor.keep_subscriptions_for(0x42, None), "consumer gone");
+
+        let abandoned = seed_initial_subscribe(&mut actor, (sid, 0x20), 3, 0x42, far_future());
+        drop(abandoned);
+        assert!(!actor.keep_subscriptions_for(0x42, None), "caller gave up");
+        // The same abandoned subscribe, now parked for its re-send.
+        let parked = actor.pending.remove(&(sid, 0x20)).unwrap();
+        actor
+            .pending_connects
+            .insert(0x42, vec![ConnectWaiter::ResendPending(parked)]);
+        assert!(
+            !actor.keep_subscriptions_for(0x42, None),
+            "caller gave up while parked"
+        );
+
+        let (reply, _rx) = oneshot::channel();
+        actor.pending_connects.insert(
+            0x42,
+            vec![ConnectWaiter::Command(Command::Subscribe {
+                node_id: 0x42,
+                paths: vec![matter_interaction::ReadPath::all()],
+                event_paths: vec![],
+                event_filters: vec![],
+                min_interval: 1,
+                max_interval: 30,
+                reply,
+            })],
+        );
+        assert!(
+            !actor.keep_subscriptions_for(0x42, None),
+            "not yet sent: it computes its own flag when it is"
+        );
+    }
+
+    /// Spec test 1 (D0): a queued, in-flight or connecting resubscribe, a
+    /// pending initial subscribe, and an initial subscribe parked for re-send
+    /// after MRP exhaustion all count; a subscription never counts itself.
+    #[tokio::test]
+    async fn in_flight_and_parked_siblings_keep_subscriptions() {
+        let mut actor = actor_with_one_fabric();
+        assert!(!actor.keep_subscriptions_for(0x42, None));
+
+        let (queued, _q_reports, _q_ctrl) = test_pending_resubscribe(2, 0x42, 3, far_future());
+        actor.resubscribes.push(queued);
+        assert!(actor.keep_subscriptions_for(0x42, None), "queued");
+        assert!(
+            !actor.keep_subscriptions_for(0x42, Some(SubId(2))),
+            "a subscription never keeps itself"
+        );
+        assert!(!actor.keep_subscriptions_for(0x43, None), "another node");
+        actor.resubscribes.clear();
+
+        let (in_flight, _f_reports, _f_ctrl) = test_pending_resubscribe(3, 0x42, 3, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (SessionId(7), 0x30), in_flight, far_future());
+        assert!(actor.keep_subscriptions_for(0x42, None), "in flight");
+        actor.pending.clear();
+
+        let (connecting, _c_reports, _c_ctrl) =
+            test_pending_resubscribe(4, 0x42, 3, Instant::now());
+        actor
+            .pending_connects
+            .insert(0x42, vec![ConnectWaiter::Resubscribe(connecting)]);
+        assert!(actor.keep_subscriptions_for(0x42, None), "connecting");
+        actor.pending_connects.clear();
+
+        let _initial_rx =
+            seed_initial_subscribe(&mut actor, (SessionId(7), 0x31), 5, 0x42, far_future());
+        assert!(actor.keep_subscriptions_for(0x42, None), "initial, pending");
+        let parked = actor.pending.remove(&(SessionId(7), 0x31)).unwrap();
+        actor
+            .pending_connects
+            .insert(0x42, vec![ConnectWaiter::ResendPending(parked)]);
+        assert!(
+            actor.keep_subscriptions_for(0x42, None),
+            "MRP exhaustion does not prove the device never received it"
+        );
+    }
+
+    /// Spec test 1 (D0): an initial subscribe re-sent after MRP exhaustion is
+    /// re-encoded, not replayed: the flag is recomputed (a sibling established
+    /// meanwhile) and the event filters start past the priming events the
+    /// failed first attempt already delivered.
+    #[tokio::test]
+    async fn an_initial_subscribe_resent_after_mrp_exhaustion_is_reencoded() {
+        let mut actor = actor_with_one_fabric();
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let _reply_rx = seed_initial_subscribe(&mut actor, (sid, 0x20), 1, 0x42, far_future());
+        let mut p = actor.pending.remove(&(sid, 0x20)).unwrap();
+        assert!(!keep_flag(&p.request.payload), "first sent alone");
+        if let PendingReply::Subscribe { report_tx, .. } = &mut p.reply {
+            report_tx.max_event_delivered = Some(41);
+        }
+        let (sink, _sibling_reports, _sibling_ctrl) = test_report_sink();
+        actor.insert_subscription(
+            SubId(9),
+            test_sub_entry(sink, sid, 0x99, 0x42, far_future()),
+        );
+
+        actor
+            .resume_resend_pending(p, sid, "127.0.0.1:5540".parse().unwrap())
+            .await;
+
+        assert_eq!(actor.pending.len(), 1, "re-sent");
+        let resent = actor.pending.values().next().unwrap();
+        let expected =
+            matter_interaction::build_subscribe_request(&matter_interaction::SubscribeRequest {
+                keep_subscriptions: true,
+                min_interval_floor: 1,
+                max_interval_ceiling: 30,
+                paths: vec![matter_interaction::ReadPath::all()],
+                event_paths: vec![],
+                event_filters: vec![matter_interaction::EventFilter::from_event_min(42)],
+            });
+        assert_eq!(resent.request.payload, expected);
+        assert!(resent.retried, "re-sent once only");
     }
 }

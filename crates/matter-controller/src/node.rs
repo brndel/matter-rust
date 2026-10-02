@@ -1512,6 +1512,21 @@ impl Node {
     /// subscription auto-resubscribes transparently on staleness/session loss,
     /// re-requesting the same attribute and event paths.
     ///
+    /// # Several subscriptions, one process per identity
+    ///
+    /// Any number of subscriptions to one node may be held at once. Each
+    /// `SubscribeRequest` tells the device whether to keep this controller's
+    /// other subscriptions (`KeepSubscriptions`): it keeps them whenever
+    /// another subscription of this controller to the node exists
+    /// (established, re-establishing, or still being set up), and asks the
+    /// device to clear them only for a lone subscription — which also clears
+    /// any that an earlier run of this process left on the device.
+    ///
+    /// The device scopes that clearing to the fabric and the subscriber's node
+    /// id — the operational identity (NOC) — not to the process. Run **one
+    /// controller process per operational identity**: two processes sharing
+    /// one would terminate each other's subscriptions.
+    ///
     /// # Errors
     ///
     /// - [`Error::SubscribeRejected`] if the device answers the
