@@ -40,6 +40,10 @@ const OP_WRITE_RESPONSE: u8 = 0x07;
 /// that requires a timed interaction arrives without a preceding `TimedRequest`.
 /// Triggers the transparent timed retry (see [`response_needs_timed`]).
 const NEEDS_TIMED_INTERACTION: u8 = 0xc6;
+/// IM status `INVALID_ACTION` (Matter 1.4 §8.10). Answers a message on a
+/// subscribe exchange that ends the attempt (chip's `ReadClient` error exit),
+/// and a steady-state report that cannot be read.
+const IM_STATUS_INVALID_ACTION: u8 = 0x80;
 
 /// `true` if a plain (non-timed) write/invoke response signals the device
 /// requires a *timed* interaction (`NEEDS_TIMED_INTERACTION`, 0xc6).
@@ -644,9 +648,11 @@ struct PendingResubscribe {
 
 /// Why one subscribe attempt failed (spec 2026-10-02 §4.2).
 ///
-/// Every failed attempt goes through [`Actor::fail_subscribe_attempt`] with
-/// one of these. `Display` feeds the resubscribe failure log; for an initial
-/// subscribe, [`Self::into_initial_error`] is what the caller gets.
+/// Every failed resubscribe attempt, and every initial-subscribe failure
+/// except the two timeouts (which keep their own paths), goes through
+/// [`Actor::fail_subscribe_attempt`] with one of these. `Display` feeds the
+/// resubscribe failure log; for an initial subscribe,
+/// [`Self::into_initial_error`] is what the caller gets.
 ///
 /// Replaces 0.16's `PendingTimeoutCause`, which named only the two timeouts.
 /// [`Actor::on_pending_timeout`] takes one for every pending kind, as it took
@@ -659,17 +665,48 @@ enum SubscribeFailure {
     /// The request was acknowledged but no Interaction Model response arrived
     /// within the response deadline.
     ResponseDeadline,
+    /// The `SubscribeResponse`, a priming `ReportData`, or a `StatusResponse`
+    /// on the exchange did not parse. A `StatusResponse` that is not a bare
+    /// status (`parse_status_response` → `Ok(None)`) counts as one.
+    Malformed(matter_interaction::ImError),
+    /// The device answered with a `StatusResponse` carrying this non-success
+    /// IM status (e.g. 0x89 `ResourceExhausted`).
+    Rejected(u8),
+    /// Any other Interaction Model message on the exchange, carrying this
+    /// opcode — including a Success `StatusResponse`, which is no answer to a
+    /// `SubscribeRequest` (chip: `CHIP_ERROR_INVALID_MESSAGE_TYPE`).
+    UnexpectedMessage(u8),
 }
 
 impl SubscribeFailure {
-    /// The error an initial subscribe's caller gets for this failure.
-    ///
-    /// Not reached for the two timeouts: an initial subscribe's timeouts keep
-    /// their own paths (MRP expiry reconnects and re-sends once, the response
-    /// deadline fails it with `ResponseTimeout`) and never come here
-    /// (review B1). The mapping exists so that path cannot panic or hang.
+    /// Whether a message on the exchange caused this failure, so it is
+    /// answered with `StatusResponse(InvalidAction)` — chip's
+    /// `ReadClient::OnMessageReceived` does that on every error exit. A
+    /// timeout has nothing to answer.
+    fn arrived_on_the_wire(&self) -> bool {
+        matches!(
+            self,
+            Self::Malformed(_) | Self::Rejected(_) | Self::UnexpectedMessage(_)
+        )
+    }
+
+    /// The error an initial subscribe's caller gets for this failure (spec
+    /// §4.2 table).
     fn into_initial_error(self) -> Error {
-        Error::Operational(self.to_string())
+        match self {
+            Self::Malformed(e) => Error::InteractionModel(e),
+            Self::Rejected(status) => Error::SubscribeRejected(status),
+            // The existing precedent: `resolve_chunked_write` reports an
+            // unexpected opcode the same way, so no new `ImError` variant.
+            Self::UnexpectedMessage(opcode) => Error::Operational(format!(
+                "unexpected message to a subscribe request: opcode 0x{opcode:02x}"
+            )),
+            // Not reached: an initial subscribe's timeouts keep their own paths
+            // (MRP expiry reconnects and re-sends once, the response deadline
+            // fails it with `ResponseTimeout`) and never come here (review B1).
+            Self::MrpExpired => Error::Operational(Self::MrpExpired.to_string()),
+            Self::ResponseDeadline => Error::Operational(Self::ResponseDeadline.to_string()),
+        }
     }
 }
 
@@ -681,6 +718,12 @@ impl std::fmt::Display for SubscribeFailure {
             }
             Self::ResponseDeadline => f.write_str(
                 "response deadline elapsed: the request was acknowledged but never answered",
+            ),
+            Self::Malformed(e) => write!(f, "malformed response: {e}"),
+            Self::Rejected(status) => write!(f, "rejected by the device: IM status 0x{status:02x}"),
+            Self::UnexpectedMessage(opcode) => write!(
+                f,
+                "unexpected message on the subscribe exchange: opcode 0x{opcode:02x}"
             ),
         }
     }
@@ -5768,12 +5811,13 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             DecodeInboundOutput::AppMessage {
                 session_id,
                 exchange_id,
+                protocol_id,
                 opcode,
                 payload,
                 ..
             } => {
                 if self.pending.contains_key(&(session_id, exchange_id)) {
-                    self.resolve_pending(session_id, exchange_id, opcode, payload)
+                    self.resolve_pending(session_id, exchange_id, protocol_id, opcode, payload)
                         .await;
                 } else if opcode == OP_REPORT_DATA {
                     self.deliver_report(session_id, exchange_id, &payload).await;
@@ -5794,10 +5838,14 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// if more chunks follow, ack to solicit the next; otherwise reply with all
     /// chunks. For a subscribe handshake, buffer/ack priming reports and finish
     /// on the `SubscribeResponse`.
+    ///
+    /// `protocol_id` reaches only the subscribe handshake, the one consumer
+    /// that checks it (spec §4.2).
     async fn resolve_pending(
         &mut self,
         session_id: SessionId,
         exchange_id: u16,
+        protocol_id: ProtocolId,
         opcode: u8,
         payload: Vec<u8>,
     ) {
@@ -5885,7 +5933,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 }
             }
             Kind::Subscribe => {
-                self.resolve_subscribe(session_id, exchange_id, opcode, payload)
+                self.resolve_subscribe(session_id, exchange_id, protocol_id, opcode, payload)
                     .await;
             }
             Kind::Timed => {
@@ -6260,129 +6308,226 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         }
     }
 
-    /// Drive the subscribe handshake on its exchange: ack+buffer priming
-    /// `ReportData`, and on `SubscribeResponse` register the subscription under
-    /// `(session, subscriptionId)` and hand the report receiver back to the
-    /// caller.
+    /// Drive the subscribe handshake on its exchange.
+    ///
+    /// - `ReportData`: a priming chunk ([`Self::resolve_priming_report`]).
+    /// - `SubscribeResponse`: the end of the handshake
+    ///   ([`Self::resolve_subscribe_response`]).
+    /// - Anything else that is an Interaction Model message ends the attempt
+    ///   through [`Self::fail_subscribe_attempt`]: a `StatusResponse` with a
+    ///   non-success status is a rejection, a Success one or one that does not
+    ///   parse as a bare status is a protocol error, and any other opcode is an
+    ///   unexpected message (spec §4.3, §4.4).
+    ///
+    /// A message that is not an Interaction Model one is ignored, whatever its
+    /// opcode: the protocol is checked before anything else, so a Secure
+    /// Channel opcode 0x01 is never read as a `StatusResponse`, and a non-IM
+    /// 0x04 / 0x05 is no longer taken for a `SubscribeResponse` / priming
+    /// report either (spec §4.2; uniform with the steady-state report path).
     async fn resolve_subscribe(
         &mut self,
         session_id: SessionId,
         exchange_id: u16,
+        protocol_id: ProtocolId,
         opcode: u8,
         payload: Vec<u8>,
     ) {
+        // Not an Interaction Model message: not ours to judge.
+        if protocol_id != ProtocolId::INTERACTION_MODEL {
+            return;
+        }
         let key = (session_id, exchange_id);
-        if opcode == OP_REPORT_DATA {
-            // Ack first (solicits the next chunk), then merge into priming.
-            if let Some(peer) = self.pending.get(&key).map(|p| p.peer) {
-                let _ = self.send_status_ack(session_id, exchange_id, peer).await;
-            }
-            if let Some(Pending {
-                reply:
-                    PendingReply::Subscribe {
-                        report_tx, priming, ..
-                    },
-                ..
-            }) = self.pending.get_mut(&key)
-            {
-                // Parse the priming chunk once and merge the parsed struct.
-                let Ok(mut rd) = matter_interaction::parse_report_data(&payload) else {
+        match opcode {
+            OP_REPORT_DATA => self.resolve_priming_report(key, &payload).await,
+            OP_SUBSCRIBE_RESPONSE => self.resolve_subscribe_response(key, &payload).await,
+            OP_STATUS_RESPONSE => {
+                let Some(p) = self.pending.remove(&key) else {
                     return;
                 };
-                // Priming events bypass the reassembler too — forward immediately.
-                for ev in std::mem::take(&mut rd.events) {
-                    if !report_tx.try_send_event(ev) {
+                let cause = match matter_interaction::parse_status_response(&payload) {
+                    Ok(Some(0)) => SubscribeFailure::UnexpectedMessage(OP_STATUS_RESPONSE),
+                    Ok(Some(status)) => SubscribeFailure::Rejected(status),
+                    Ok(None) => SubscribeFailure::Malformed(
+                        matter_interaction::ImError::UnexpectedValue("not a bare StatusResponse"),
+                    ),
+                    Err(e) => SubscribeFailure::Malformed(e),
+                };
+                self.fail_subscribe_attempt(key, p, cause).await;
+            }
+            _ => {
+                let Some(p) = self.pending.remove(&key) else {
+                    return;
+                };
+                self.fail_subscribe_attempt(key, p, SubscribeFailure::UnexpectedMessage(opcode))
+                    .await;
+            }
+        }
+    }
+
+    /// A priming `ReportData` on a subscribe exchange: parse it, then ack it
+    /// (which solicits the next chunk), then forward its events and merge its
+    /// attributes into the priming reassembler.
+    ///
+    /// The ack follows the parse, as chip's `ReadClient::ProcessReportData`
+    /// sends its Success only after a good parse. A chunk that does not parse
+    /// fails the attempt ([`SubscribeFailure::Malformed`], answered
+    /// `InvalidAction`) instead of being Success-acked and skipped, which
+    /// established the subscription on a silently incomplete priming dump. The
+    /// parse is synchronous in this handler, so the reply still piggybacks the
+    /// MRP ack.
+    async fn resolve_priming_report(&mut self, key: (SessionId, u16), payload: &[u8]) {
+        let mut rd = match matter_interaction::parse_report_data(payload) {
+            Ok(rd) => rd,
+            Err(e) => {
+                if let Some(p) = self.pending.remove(&key) {
+                    self.fail_subscribe_attempt(key, p, SubscribeFailure::Malformed(e))
+                        .await;
+                }
+                return;
+            }
+        };
+        if let Some(peer) = self.pending.get(&key).map(|p| p.peer) {
+            let _ = self.send_status_ack(key.0, key.1, peer).await;
+        }
+        if let Some(Pending {
+            reply: PendingReply::Subscribe {
+                report_tx, priming, ..
+            },
+            ..
+        }) = self.pending.get_mut(&key)
+        {
+            // Priming events bypass the reassembler too — forward immediately.
+            for ev in std::mem::take(&mut rd.events) {
+                if !report_tx.try_send_event(ev) {
+                    break;
+                }
+            }
+            if let Some(attrs) = priming.push_parsed(rd) {
+                for (path, value) in attrs {
+                    // Priming reports are bounded the same way as steady-state
+                    // ones: try_send, drop+count on a full buffer.
+                    if !report_tx.try_send_report(AttributeReport { path, value }) {
                         break;
                     }
                 }
-                if let Some(attrs) = priming.push_parsed(rd) {
-                    for (path, value) in attrs {
-                        // Priming reports are bounded the same way as steady-state
-                        // ones: try_send, drop+count on a full buffer.
-                        if !report_tx.try_send_report(AttributeReport { path, value }) {
-                            break;
-                        }
-                    }
-                }
             }
-        } else if opcode == OP_SUBSCRIBE_RESPONSE {
-            let Some(p) = self.pending.remove(&key) else {
+        }
+    }
+
+    /// The `SubscribeResponse` that ends a subscribe handshake: register the
+    /// subscription under `(session, subscriptionId)` and hand the report
+    /// receiver back to an initial subscribe's caller.
+    ///
+    /// One that does not parse fails the attempt
+    /// ([`SubscribeFailure::Malformed`], answered `InvalidAction`): an initial
+    /// subscribe's caller gets the parse error, as before, and a resubscribe is
+    /// rescheduled on its backoff — it used to be dropped, ending the
+    /// consumer's stream with no cause.
+    async fn resolve_subscribe_response(&mut self, key: (SessionId, u16), payload: &[u8]) {
+        let Some(p) = self.pending.remove(&key) else {
+            return;
+        };
+        let resp = match matter_interaction::parse_subscribe_response(payload) {
+            Ok(resp) => resp,
+            Err(e) => {
+                self.fail_subscribe_attempt(key, p, SubscribeFailure::Malformed(e))
+                    .await;
                 return;
-            };
-            let PendingReply::Subscribe {
-                sub_id,
-                reply,
-                report_tx,
-                report_rx,
+            }
+        };
+        let PendingReply::Subscribe {
+            sub_id,
+            reply,
+            report_tx,
+            report_rx,
+            node_id,
+            paths,
+            event_paths,
+            event_filters,
+            min_interval,
+            // What we asked for: the caller's ceiling, carried unchanged
+            // through every resubscribe.
+            max_interval: max_interval_ceiling,
+            ..
+        } = p.reply
+        else {
+            return;
+        };
+        // The episode (if this was one) ends here, established — and only
+        // here. A failed attempt stays in its episode, so its advert cooldown
+        // stamp must survive the failure (spec §4.2, review B2); removing it
+        // before the parse let a device that keeps answering with a malformed
+        // response be advert-pulled on every advert.
+        self.resubscribe_pulled_at.remove(&sub_id);
+        // Liveness uses the *negotiated* max interval (the device's agreed
+        // reporting cadence); a resubscribe re-requests the caller's
+        // `max_interval_ceiling` (see `SubEntry`).
+        let deadline = Instant::now()
+            + std::time::Duration::from_secs(u64::from(resp.max_interval))
+            + LIVENESS_GRACE;
+        // Signal (re-)establishment to the consumer on the reliable control
+        // channel BEFORE inserting, so we can reap on a dead receiver. Control
+        // events are never dropped by report backpressure (chip's
+        // OnSubscriptionEstablished). Any priming Reports already flowed — they
+        // precede the SubscribeResponse on the wire. If the consumer's receiver
+        // is already gone (a resubscribe raced a cancel/Drop), do not insert a
+        // zombie SubEntry that resubscribes forever.
+        if !report_tx.send_control(SubscriptionEvent::Established {
+            subscription_id: resp.subscription_id,
+            max_interval: resp.max_interval,
+        }) {
+            return;
+        }
+        self.insert_subscription(
+            sub_id,
+            SubEntry {
+                tx: report_tx,
+                peer: p.peer,
+                reassembler: ReportReassembler::default(),
+                session_id: key.0,
+                wire_sub_id: resp.subscription_id,
                 node_id,
                 paths,
                 event_paths,
                 event_filters,
                 min_interval,
-                // What we asked for: the caller's ceiling, carried unchanged
-                // through every resubscribe.
-                max_interval: max_interval_ceiling,
-                ..
-            } = p.reply
-            else {
-                return;
-            };
-            // The episode (if this was one) ends here, whatever the response
-            // says: established, or dropped on a parse failure.
-            self.resubscribe_pulled_at.remove(&sub_id);
-            match matter_interaction::parse_subscribe_response(&payload) {
-                Ok(resp) => {
-                    // Liveness uses the *negotiated* max interval (the device's
-                    // agreed reporting cadence); a resubscribe re-requests the
-                    // caller's `max_interval_ceiling` (see `SubEntry`).
-                    let deadline = Instant::now()
-                        + std::time::Duration::from_secs(u64::from(resp.max_interval))
-                        + LIVENESS_GRACE;
-                    // Signal (re-)establishment to the consumer on the reliable
-                    // control channel BEFORE inserting, so we can reap on a dead
-                    // receiver. Control events are never dropped by report
-                    // backpressure (chip's OnSubscriptionEstablished). Any priming
-                    // Reports already flowed — they precede the SubscribeResponse
-                    // on the wire. If the consumer's receiver is already gone (a
-                    // resubscribe raced a cancel/Drop), do not insert a zombie
-                    // SubEntry that resubscribes forever.
-                    if !report_tx.send_control(SubscriptionEvent::Established {
-                        subscription_id: resp.subscription_id,
-                        max_interval: resp.max_interval,
-                    }) {
-                        return;
-                    }
-                    self.insert_subscription(
-                        sub_id,
-                        SubEntry {
-                            tx: report_tx,
-                            peer: p.peer,
-                            reassembler: ReportReassembler::default(),
-                            session_id,
-                            wire_sub_id: resp.subscription_id,
-                            node_id,
-                            paths,
-                            event_paths,
-                            event_filters,
-                            min_interval,
-                            max_interval: resp.max_interval,
-                            max_interval_ceiling,
-                            liveness_deadline: deadline,
-                        },
-                    );
-                    // Initial subscribe hands the receivers back; a resubscribe
-                    // (reply/report_rx None) reuses the consumer's existing ones.
-                    if let (Some(reply), Some(rx)) = (reply, report_rx) {
-                        let _ = reply.send(Ok((rx, sub_id)));
-                    }
-                }
-                Err(e) => {
-                    if let Some(reply) = reply {
-                        let _ = reply.send(Err(Error::InteractionModel(e)));
-                    }
-                }
-            }
+                max_interval: resp.max_interval,
+                max_interval_ceiling,
+                liveness_deadline: deadline,
+            },
+        );
+        // Initial subscribe hands the receivers back; a resubscribe
+        // (reply/report_rx None) reuses the consumer's existing ones.
+        if let (Some(reply), Some(rx)) = (reply, report_rx) {
+            let _ = reply.send(Ok((rx, sub_id)));
         }
+    }
+
+    /// Send an application `StatusResponse` carrying `status` on an existing
+    /// exchange; it also piggybacks the MRP ack for what arrived there. Sent
+    /// reliably, for the reason given on [`Self::send_status_ack`].
+    async fn send_status(
+        &mut self,
+        sid: SessionId,
+        exchange: u16,
+        peer: SocketAddr,
+        status: u8,
+    ) -> Result<(), Error> {
+        let payload = matter_interaction::build_status_response(status);
+        let out = self.sessions.encode_outbound(
+            sid,
+            Some(exchange),
+            OP_STATUS_RESPONSE,
+            ProtocolId::INTERACTION_MODEL,
+            &payload,
+            MrpFlags { reliable: true },
+            Instant::now(),
+        )?;
+        self.transport
+            .send_to(&out.wire_bytes, peer)
+            .await
+            .map_err(|e| Error::Operational(format!("status response send: {e}")))?;
+        Ok(())
     }
 
     /// Send an application `StatusResponse(Success)` on a subscription exchange
@@ -6405,21 +6550,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         exchange: u16,
         peer: SocketAddr,
     ) -> Result<(), Error> {
-        let status = matter_interaction::build_status_response(0);
-        let out = self.sessions.encode_outbound(
-            sid,
-            Some(exchange),
-            OP_STATUS_RESPONSE,
-            ProtocolId::INTERACTION_MODEL,
-            &status,
-            MrpFlags { reliable: true },
-            Instant::now(),
-        )?;
-        self.transport
-            .send_to(&out.wire_bytes, peer)
-            .await
-            .map_err(|e| Error::Operational(format!("status ack send: {e}")))?;
-        Ok(())
+        self.send_status(sid, exchange, peer, 0).await
     }
 
     /// Drive MRP for all sessions: send retransmits/standalone-acks, and on
@@ -6598,7 +6729,8 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     }
                 }
             }
-            self.fail_subscribe_attempt(p, cause);
+            self.fail_subscribe_attempt((session_id, exchange_id), p, cause)
+                .await;
             return;
         }
         // ChunkedWrite pendings are always inserted with `retried: true` —
@@ -6662,21 +6794,40 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// One subscribe attempt failed: the single path every failure cause takes
     /// (spec §4.2), so they all behave alike.
     ///
+    /// - **Answer** (`key` is the attempt's exchange): a failure caused by a
+    ///   message on the exchange ([`SubscribeFailure::arrived_on_the_wire`]) is
+    ///   answered `StatusResponse(InvalidAction)`, as chip's
+    ///   `ReadClient::OnMessageReceived` answers on every error exit. A timeout
+    ///   sends nothing.
     /// - **Initial subscribe** (`reply: Some`): the caller gets
     ///   [`SubscribeFailure::into_initial_error`]; nothing is rescheduled (the
     ///   caller retries, as before).
     /// - **Resubscribe** (`reply: None`): rebuilt into a [`PendingResubscribe`]
     ///   and rescheduled on its backoff, its event filters re-bumped to the
     ///   delivery watermark exactly as [`Self::begin_resubscribe`] does — an
-    ///   attempt can fail after some of its priming events already reached the
-    ///   consumer, and the next attempt's priming dump must not replay them.
-    ///   The episode continues, so the advert cooldown stamp stays.
+    ///   attempt can fail mid-priming, after some priming events already
+    ///   reached the consumer, and the next attempt's priming dump must not
+    ///   replay them. The episode continues, so the advert cooldown stamp stays
+    ///   (review B2). Retrying a rejection forever, including effectively
+    ///   permanent statuses, is deliberate chip parity; the backoff spaces the
+    ///   retries out to at most one per ~92 min.
     /// - **Consumer gone** (a resubscribe whose consumer dropped both
     ///   receivers): dropped with its cooldown stamp; nothing is rescheduled
     ///   (the D3 backstop: the `Drop` cancel is a lossy `try_send`).
     ///
     /// Nothing is evicted here; the timeout caller decides that.
-    fn fail_subscribe_attempt(&mut self, pending: Pending, cause: SubscribeFailure) {
+    async fn fail_subscribe_attempt(
+        &mut self,
+        key: (SessionId, u16),
+        pending: Pending,
+        cause: SubscribeFailure,
+    ) {
+        if cause.arrived_on_the_wire() {
+            // Best effort: the attempt is over whether or not the device hears it.
+            let _ = self
+                .send_status(key.0, key.1, pending.peer, IM_STATUS_INVALID_ACTION)
+                .await;
+        }
         // Only subscribe pendings are ever handed here.
         let PendingReply::Subscribe {
             sub_id,
@@ -13467,6 +13618,17 @@ mod tests {
         assert_ne!(mrp, deadline);
         assert!(mrp.contains("never acknowledged"), "{mrp}");
         assert!(deadline.contains("never answered"), "{deadline}");
+        let malformed =
+            SubscribeFailure::Malformed(matter_interaction::ImError::NotAStruct).to_string();
+        assert!(malformed.starts_with("malformed response: "), "{malformed}");
+        assert_eq!(
+            SubscribeFailure::Rejected(0x89).to_string(),
+            "rejected by the device: IM status 0x89"
+        );
+        assert_eq!(
+            SubscribeFailure::UnexpectedMessage(0x01).to_string(),
+            "unexpected message on the subscribe exchange: opcode 0x01"
+        );
     }
 
     /// Spec test 14: forgetting a node deletes its resubscribe waiters, so it
@@ -19504,6 +19666,7 @@ mod tests {
             .resolve_subscribe(
                 SessionId(7),
                 0x21,
+                ProtocolId::INTERACTION_MODEL,
                 OP_SUBSCRIBE_RESPONSE,
                 build_subscribe_response(0x55, 30),
             )
@@ -20232,6 +20395,7 @@ mod tests {
             .resolve_subscribe(
                 SessionId(7),
                 0x60,
+                ProtocolId::INTERACTION_MODEL,
                 OP_SUBSCRIBE_RESPONSE,
                 build_subscribe_response(0x56, 30),
             )
@@ -21254,5 +21418,442 @@ mod tests {
         );
         assert!(actor.pending.is_empty());
         assert!(actor.pending_connects.is_empty(), "no reconnect");
+    }
+
+    /// How long a test waits for a message the actor is expected to send.
+    const SENT_WITHIN: Duration = Duration::from_secs(2);
+    /// How long a test watches for a message the actor must NOT send.
+    const NOTHING_SENT_WITHIN: Duration = Duration::from_millis(500);
+
+    /// An actor (one fabric, [`NullDiscovery`]) whose transport's far end the
+    /// test holds, plus one PASE session registered on BOTH ends with the same
+    /// keys, so the test can feed the actor device messages and decode exactly
+    /// what the actor puts on the wire.
+    struct Wired {
+        actor: Actor<InMemoryDatagram, NullDiscovery>,
+        /// The device's end of the actor's transport.
+        dev: InMemoryDatagram,
+        /// The device's session table.
+        device: SessionManager,
+        /// The actor's id for the shared session.
+        sid: SessionId,
+        /// The device's id for it.
+        dev_sid: SessionId,
+    }
+
+    impl Wired {
+        /// Encode `payload` as the device would — on `exchange`, or on a fresh
+        /// device-initiated exchange for `None`, reliably — and run it through
+        /// the actor's inbound path. Returns the exchange id used.
+        async fn deliver(
+            &mut self,
+            exchange: Option<u16>,
+            protocol_id: ProtocolId,
+            opcode: u8,
+            payload: &[u8],
+        ) -> u16 {
+            let out = self
+                .device
+                .encode_outbound(
+                    self.dev_sid,
+                    exchange,
+                    opcode,
+                    protocol_id,
+                    payload,
+                    MrpFlags { reliable: true },
+                    Instant::now(),
+                )
+                .unwrap();
+            let from = self.dev.local_addr();
+            self.actor.handle_inbound(&out.wire_bytes, from).await;
+            out.exchange_id
+        }
+
+        /// The next application message the actor sent, decoded on the device
+        /// side as `(exchange, protocol, opcode, payload)`; standalone acks are
+        /// skipped. `None` if none arrives within `within`.
+        async fn next_sent(&mut self, within: Duration) -> Option<(u16, ProtocolId, u8, Vec<u8>)> {
+            let deadline = tokio::time::Instant::now() + within;
+            loop {
+                let Ok(Ok((wire, _))) =
+                    tokio::time::timeout_at(deadline, self.dev.recv_from()).await
+                else {
+                    return None;
+                };
+                if let Ok(DecodeInboundOutput::AppMessage {
+                    exchange_id,
+                    protocol_id,
+                    opcode,
+                    payload,
+                    ..
+                }) = self.device.decode_inbound(&wire, Instant::now())
+                {
+                    return Some((exchange_id, protocol_id, opcode, payload));
+                }
+            }
+        }
+
+        /// `(exchange, IM status)` of the next message the actor sent, which
+        /// must be an Interaction Model `StatusResponse`. `None` if nothing is
+        /// sent within `within`.
+        async fn next_status(&mut self, within: Duration) -> Option<(u16, u8)> {
+            let (exchange, protocol_id, opcode, payload) = self.next_sent(within).await?;
+            assert_eq!(
+                (protocol_id, opcode),
+                (ProtocolId::INTERACTION_MODEL, OP_STATUS_RESPONSE),
+                "expected a StatusResponse"
+            );
+            let status = matter_interaction::parse_status_response(&payload)
+                .unwrap()
+                .expect("a bare StatusResponse");
+            Some((exchange, status))
+        }
+    }
+
+    fn wired_actor() -> Wired {
+        use matter_crypto::pase::PaseSessionKeys;
+        let keys = || PaseSessionKeys {
+            ke: [0u8; 16],
+            i2r_key: [1u8; 16],
+            r2i_key: [2u8; 16],
+            attestation_key: [3u8; 16],
+        };
+        let (io, dev) = InMemoryDatagram::pair();
+        let mut actor = actor_with_one_fabric_on(io);
+        let mut device = SessionManager::new();
+        let dev_sid = device.allocate_session_id();
+        let sid = actor.sessions.register_pase(
+            keys(),
+            SessionRole::Initiator,
+            dev_sid.0,
+            matter_transport::PeerHint::default(),
+        );
+        device.register_pase_with_local_id(
+            dev_sid,
+            keys(),
+            SessionRole::Responder,
+            sid.0,
+            matter_transport::PeerHint::default(),
+        );
+        Wired {
+            actor,
+            dev,
+            device,
+            sid,
+            dev_sid,
+        }
+    }
+
+    /// Spec test 2 (D1 + review B2): a resubscribe whose `SubscribeResponse`
+    /// does not parse is answered `InvalidAction` and rescheduled — not dropped
+    /// — and keeps its advert cooldown stamp: a device that keeps answering
+    /// garbage must not be advert-pulled on every advert.
+    #[tokio::test]
+    async fn a_garbage_subscribe_response_reschedules_the_resubscribe_and_keeps_its_cooldown() {
+        let mut w = wired_actor();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 2, Instant::now());
+        seed_inflight_resubscribe(&mut w.actor, (w.sid, 0x50), pr, far_future());
+        w.actor
+            .resubscribe_pulled_at
+            .insert(SubId(1), Instant::now());
+        // An empty message: every IM parser rejects it (not a struct).
+        w.deliver(
+            Some(0x50),
+            ProtocolId::INTERACTION_MODEL,
+            OP_SUBSCRIBE_RESPONSE,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((0x50, IM_STATUS_INVALID_ACTION))
+        );
+        assert!(w.actor.pending.is_empty());
+        assert_eq!(
+            queued_state(&w.actor, 1).0,
+            3,
+            "attempt 2 failed; next step"
+        );
+        assert_eq!(w.actor.reschedule_causes.len(), 1);
+        assert!(
+            w.actor.reschedule_causes[0]
+                .1
+                .starts_with("malformed response"),
+            "{:?}",
+            w.actor.reschedule_causes
+        );
+        assert!(
+            w.actor.resubscribe_pulled_at.contains_key(&SubId(1)),
+            "B2: a failed attempt keeps its episode and its cooldown"
+        );
+        w.actor.assert_pulled_at_within_episodes();
+    }
+
+    /// Spec test 2: an initial subscribe whose `SubscribeResponse` does not
+    /// parse still fails with the parse error (as in 0.16), and now also
+    /// answers the device `InvalidAction`.
+    #[tokio::test]
+    async fn a_garbage_subscribe_response_fails_an_initial_subscribe_with_the_parse_error() {
+        let mut w = wired_actor();
+        let mut reply_rx =
+            seed_initial_subscribe(&mut w.actor, (w.sid, 0x51), 1, 0x42, far_future());
+        w.deliver(
+            Some(0x51),
+            ProtocolId::INTERACTION_MODEL,
+            OP_SUBSCRIBE_RESPONSE,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((0x51, IM_STATUS_INVALID_ACTION))
+        );
+        let outcome = initial_subscribe_outcome(&mut reply_rx);
+        assert!(
+            matches!(outcome, Some(Err(Error::InteractionModel(_)))),
+            "got {outcome:?}"
+        );
+        assert!(
+            w.actor.resubscribes.is_empty(),
+            "an initial subscribe is not rescheduled"
+        );
+    }
+
+    /// Spec test 2 (D1, priming): a priming chunk is acked only once it has
+    /// parsed. One that does not parse is answered `InvalidAction` — never
+    /// Success-acked and skipped, which would establish the subscription on an
+    /// incomplete priming dump — and fails the attempt; the rebuilt attempt's
+    /// event filters start past the priming event already delivered.
+    #[tokio::test]
+    async fn a_garbage_priming_report_is_answered_invalid_action_and_fails_the_attempt() {
+        let mut w = wired_actor();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 2, Instant::now());
+        seed_inflight_resubscribe(&mut w.actor, (w.sid, 0x52), pr, far_future());
+        let event = build_report_data_event(1, 0x0028, 0x00, 41, &matter_codec::Value::Uint(1));
+        w.deliver(
+            Some(0x52),
+            ProtocolId::INTERACTION_MODEL,
+            OP_REPORT_DATA,
+            &event,
+        )
+        .await;
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((0x52, 0x00)),
+            "a good priming chunk is acked Success"
+        );
+        w.deliver(
+            Some(0x52),
+            ProtocolId::INTERACTION_MODEL,
+            OP_REPORT_DATA,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((0x52, IM_STATUS_INVALID_ACTION)),
+            "a bad one is answered InvalidAction, not Success"
+        );
+        assert!(w.actor.pending.is_empty(), "the attempt is over");
+        assert_eq!(queued_state(&w.actor, 1).0, 3);
+        assert_eq!(
+            w.actor.resubscribes[0].event_filters,
+            vec![matter_interaction::EventFilter::from_event_min(42)]
+        );
+    }
+
+    /// Spec test 3 (D2): a device that rejects the first subscribe with a
+    /// `StatusResponse` fails it at once with the raw status — not after the
+    /// 30 s response deadline.
+    #[tokio::test]
+    async fn a_status_response_rejects_an_initial_subscribe_at_once() {
+        let mut w = wired_actor();
+        let mut reply_rx =
+            seed_initial_subscribe(&mut w.actor, (w.sid, 0x53), 1, 0x42, far_future());
+        w.deliver(
+            Some(0x53),
+            ProtocolId::INTERACTION_MODEL,
+            OP_STATUS_RESPONSE,
+            &matter_interaction::build_status_response(0x89),
+        )
+        .await;
+        let outcome = initial_subscribe_outcome(&mut reply_rx);
+        assert!(
+            matches!(outcome, Some(Err(Error::SubscribeRejected(0x89)))),
+            "got {outcome:?}"
+        );
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((0x53, IM_STATUS_INVALID_ACTION))
+        );
+        assert!(w.actor.pending.is_empty());
+    }
+
+    /// Spec test 3 (D2): a rejected resubscribe is rescheduled on the normal
+    /// backoff and evicts nothing — the session demonstrably works, it just
+    /// carried the rejection.
+    #[tokio::test]
+    async fn a_rejected_resubscribe_is_rescheduled_and_keeps_its_route_and_session() {
+        let mut w = wired_actor();
+        let fabric_id = w.actor.sole_fabric().unwrap().fabric_id;
+        w.actor.cache.insert(
+            (fabric_id, 0x42),
+            CachedSession {
+                session_id: w.sid,
+                peer: "127.0.0.1:5540".parse().unwrap(),
+            },
+        );
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 2, Instant::now());
+        seed_inflight_resubscribe(&mut w.actor, (w.sid, 0x54), pr, far_future());
+        w.deliver(
+            Some(0x54),
+            ProtocolId::INTERACTION_MODEL,
+            OP_STATUS_RESPONSE,
+            &matter_interaction::build_status_response(0x89),
+        )
+        .await;
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((0x54, IM_STATUS_INVALID_ACTION))
+        );
+        assert_eq!(queued_state(&w.actor, 1).0, 3);
+        assert_eq!(
+            w.actor.reschedule_causes,
+            vec![(SubId(1), SubscribeFailure::Rejected(0x89).to_string())]
+        );
+        assert_eq!(
+            w.actor.cache.get(&(fabric_id, 0x42)).map(|c| c.session_id),
+            Some(w.sid),
+            "route kept"
+        );
+        assert!(w.actor.sessions.get(w.sid).is_some(), "session kept");
+    }
+
+    /// Spec test 3 (D2): a Success `StatusResponse` is not an answer to a
+    /// `SubscribeRequest` (chip: `CHIP_ERROR_INVALID_MESSAGE_TYPE`).
+    #[tokio::test]
+    async fn a_success_status_response_to_a_subscribe_is_an_unexpected_message() {
+        let mut w = wired_actor();
+        let mut reply_rx =
+            seed_initial_subscribe(&mut w.actor, (w.sid, 0x55), 1, 0x42, far_future());
+        w.deliver(
+            Some(0x55),
+            ProtocolId::INTERACTION_MODEL,
+            OP_STATUS_RESPONSE,
+            &matter_interaction::build_status_response(0x00),
+        )
+        .await;
+        match initial_subscribe_outcome(&mut reply_rx) {
+            Some(Err(Error::Operational(msg))) => assert_eq!(
+                msg,
+                "unexpected message to a subscribe request: opcode 0x01"
+            ),
+            other => panic!("expected the unexpected-message error, got {other:?}"),
+        }
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((0x55, IM_STATUS_INVALID_ACTION))
+        );
+    }
+
+    /// Spec test 3 (D2): a `StatusResponse` that is not a bare status
+    /// (`parse_status_response` → `Ok(None)`) is malformed.
+    #[tokio::test]
+    async fn a_status_response_that_is_not_a_bare_status_is_malformed() {
+        let mut w = wired_actor();
+        let mut reply_rx =
+            seed_initial_subscribe(&mut w.actor, (w.sid, 0x56), 1, 0x42, far_future());
+        // A WriteRequest body: tag 0 is a bool, so not a bare status.
+        w.deliver(
+            Some(0x56),
+            ProtocolId::INTERACTION_MODEL,
+            OP_STATUS_RESPONSE,
+            &matter_interaction::build_write_request(&[]),
+        )
+        .await;
+        let outcome = initial_subscribe_outcome(&mut reply_rx);
+        assert!(
+            matches!(
+                outcome,
+                Some(Err(Error::InteractionModel(
+                    matter_interaction::ImError::UnexpectedValue("not a bare StatusResponse")
+                )))
+            ),
+            "got {outcome:?}"
+        );
+    }
+
+    /// Spec test 3 / §4.2: the subscribe handshake acts only on Interaction
+    /// Model messages, so a Secure Channel opcode 0x01 on the exchange is never
+    /// read as a `StatusResponse`, nor a non-IM 0x04 as a `SubscribeResponse`;
+    /// both are ignored.
+    #[tokio::test]
+    async fn a_non_im_message_with_the_status_opcode_is_not_a_status_response() {
+        let mut w = wired_actor();
+        let mut reply_rx =
+            seed_initial_subscribe(&mut w.actor, (w.sid, 0x57), 1, 0x42, far_future());
+        w.deliver(
+            Some(0x57),
+            ProtocolId::SECURE_CHANNEL,
+            OP_STATUS_RESPONSE,
+            &matter_interaction::build_status_response(0x89),
+        )
+        .await;
+        // Nor is a non-IM opcode 0x04 taken for a `SubscribeResponse`.
+        w.deliver(
+            Some(0x57),
+            ProtocolId::SECURE_CHANNEL,
+            OP_SUBSCRIBE_RESPONSE,
+            &build_subscribe_response(0x55, 30),
+        )
+        .await;
+        assert!(initial_subscribe_outcome(&mut reply_rx).is_none());
+        assert!(w.actor.subscriptions.is_empty(), "not established");
+        assert!(
+            w.actor.pending.contains_key(&(w.sid, 0x57)),
+            "still waiting"
+        );
+        assert!(
+            w.next_sent(NOTHING_SENT_WITHIN).await.is_none(),
+            "nothing answered"
+        );
+    }
+
+    /// Spec §4.3: any other Interaction Model message on a subscribe exchange
+    /// ends the attempt at once instead of waiting out the deadline.
+    #[tokio::test]
+    async fn an_unexpected_opcode_ends_a_subscribe_attempt() {
+        let mut w = wired_actor();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 2, Instant::now());
+        seed_inflight_resubscribe(&mut w.actor, (w.sid, 0x58), pr, far_future());
+        // 0x09 is an InvokeResponse: no answer to a SubscribeRequest.
+        w.deliver(Some(0x58), ProtocolId::INTERACTION_MODEL, 0x09, &[])
+            .await;
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((0x58, IM_STATUS_INVALID_ACTION))
+        );
+        assert_eq!(
+            w.actor.reschedule_causes,
+            vec![(
+                SubId(1),
+                SubscribeFailure::UnexpectedMessage(0x09).to_string()
+            )]
+        );
+    }
+
+    /// Review focus 4: `InvalidAction` answers an inbound message only. A
+    /// timed-out attempt puts nothing on the wire.
+    #[tokio::test]
+    async fn a_timed_out_subscribe_attempt_sends_nothing_on_the_wire() {
+        let mut w = wired_actor();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 2, Instant::now());
+        seed_inflight_resubscribe(&mut w.actor, (w.sid, 0x59), pr, far_future());
+        let sid = w.sid;
+        w.actor
+            .on_pending_timeout(sid, 0x59, SubscribeFailure::MrpExpired)
+            .await;
+        assert_eq!(queued_state(&w.actor, 1).0, 3, "rescheduled");
+        assert!(w.next_sent(NOTHING_SENT_WITHIN).await.is_none());
     }
 }

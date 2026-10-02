@@ -1514,9 +1514,15 @@ impl Node {
     ///
     /// # Errors
     ///
-    /// [`Error::ControllerStopped`] if the owning task stopped, or any
-    /// connect / transport / interaction-model error while establishing the
-    /// subscription.
+    /// - [`Error::SubscribeRejected`] if the device answers the
+    ///   `SubscribeRequest` with a non-success Interaction Model status (for
+    ///   example 0x89 `ResourceExhausted` when its subscription resources are
+    ///   full), as soon as that answer arrives.
+    /// - [`Error::ResponseTimeout`] if the device acknowledges the request but
+    ///   never answers it within the response deadline.
+    /// - [`Error::ControllerStopped`] if the owning task stopped, or any other
+    ///   connect / transport / interaction-model error while establishing the
+    ///   subscription.
     pub async fn subscribe(
         &self,
         attrs: &[ReadPath],

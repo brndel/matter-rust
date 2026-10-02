@@ -83,6 +83,18 @@ pub enum Error {
         after: std::time::Duration,
     },
 
+    /// The device rejected a subscribe request with an Interaction Model status
+    /// code (e.g. 0x89 `ResourceExhausted` when its subscription resources are
+    /// full, 0xCB-range path quotas, 0x80 `InvalidAction`, 0x7E
+    /// `UnsupportedAccess`). Raw status preserved.
+    ///
+    /// Returned by [`Node::subscribe`](crate::Node::subscribe) as soon as the
+    /// rejection arrives. A subscription that is already established and is
+    /// rejected while re-establishing itself does not surface this: it retries
+    /// on its backoff, as chip's `ReadClient` does.
+    #[error("subscribe rejected by the device (IM status {0:#04x})")]
+    SubscribeRejected(u8),
+
     /// Attestation trust material could not be loaded.
     #[error("attestation trust error: {0}")]
     Trust(String),
@@ -232,6 +244,14 @@ mod tests {
         assert!(
             msg.contains("from_dirs"),
             "NoTrust must name from_dirs: {msg}"
+        );
+    }
+
+    #[test]
+    fn subscribe_rejected_names_the_status_in_hex() {
+        assert_eq!(
+            crate::error::Error::SubscribeRejected(0x89).to_string(),
+            "subscribe rejected by the device (IM status 0x89)"
         );
     }
 
