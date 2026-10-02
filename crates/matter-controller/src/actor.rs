@@ -661,11 +661,16 @@ struct PendingResubscribe {
 
 /// Why one subscribe attempt failed (spec 2026-10-02 §4.2).
 ///
-/// Every failed resubscribe attempt, and every initial-subscribe failure
-/// except the two timeouts (which keep their own paths), goes through
-/// [`Actor::fail_subscribe_attempt`] with one of these. `Display` feeds the
-/// resubscribe failure log; for an initial subscribe,
-/// [`Self::into_initial_error`] is what the caller gets.
+/// Every failure of an attempt whose `SubscribeRequest` is out — an answer on
+/// its exchange that is malformed, a rejection or unexpected, and for a
+/// resubscribe either of the two timeouts — goes through
+/// [`Actor::fail_subscribe_attempt`] with one of these. An initial subscribe's
+/// timeouts keep the reconnect-and-re-send-once path. Failures before the
+/// request is out do not come here: a resubscribe whose connect, send or sole
+/// fabric lookup fails goes straight to [`Actor::reschedule_resubscribe`], and
+/// an initial subscribe whose session or send fails returns that error to the
+/// caller. `Display` feeds the resubscribe failure log; for an initial
+/// subscribe, [`Self::into_initial_error`] is what the caller gets.
 ///
 /// Replaces 0.16's `PendingTimeoutCause`, which named only the two timeouts.
 /// [`Actor::on_pending_timeout`] takes one for every pending kind, as it took
@@ -6478,17 +6483,20 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// to `session_id` when it was established on another session.
     ///
     /// 1. An exact `(session, subscription id)` hit in `sub_index`.
-    /// 2. Otherwise the session's peer node (a CASE session carries it in its
-    ///    [`matter_transport::PeerHint`]) and the subscription id, as chip
-    ///    finds a report's subscription by (fabric, node, subscription id): a
-    ///    publisher may report on any session it holds with us, and since a
-    ///    liveness timeout opens a new session while siblings stay on the old
-    ///    one, the two can differ. Exactly one match is delivered and moved to
-    ///    this session through [`Self::insert_subscription`], so the
+    /// 2. Otherwise (fabric, node, subscription id), as chip finds a report's
+    ///    subscription: the arriving session's fabric and peer node (a CASE
+    ///    session carries both in its [`matter_transport::PeerHint`]) and the
+    ///    report's subscription id. A publisher may report on any session it
+    ///    holds with us, and since a liveness timeout opens a new session while
+    ///    siblings stay on the old one, the two can differ. The session's
+    ///    fabric must be the sole fabric, the only one a subscription is made
+    ///    on ([`Self::session_for`]); a session with no fabric or node id
+    ///    (PASE), on another fabric, or with no sole fabric to compare
+    ///    against, matches nothing. Exactly one match is delivered and moved
+    ///    to this session through [`Self::insert_subscription`], so the
     ///    keep-first-owner rule holds (chip moves its session holder the same
-    ///    way). None or several matches — several only from a device reusing a
-    ///    subscription id, which is not compliant — count as unknown, as does
-    ///    a session with no peer node id (PASE).
+    ///    way). None or several matches — several only from a device reusing
+    ///    a subscription id, which is not compliant — count as unknown.
     ///
     /// A re-keyed subscription also takes the arriving session's peer address
     /// (else `from`, where the report came from): a cross-session hit is
@@ -6504,7 +6512,11 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         if let Some(&sub_id) = self.sub_index.get(&(session_id, wire_sub_id)) {
             return Some(sub_id);
         }
-        let node_id = self.sessions.get(session_id)?.peer.node_id?.0;
+        let peer = &self.sessions.get(session_id)?.peer;
+        let node_id = peer.node_id?.0;
+        if peer.fabric_id? != self.sole_fabric().ok()?.fabric_id {
+            return None;
+        }
         let mut matching = self
             .subscriptions
             .iter()
@@ -7236,11 +7248,16 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// This is handled as **keep-first-owner**: the key is claimed only when
     /// vacant or already owned by this `sub_id`; if a different `SubId`
     /// already holds it, that owner's index entry is left untouched and the
-    /// new entry is simply left unindexed. An unindexed entry is dark to
-    /// `deliver_report` until its own liveness deadline drives a resubscribe
-    /// (which asks the device for a fresh id) — no worse than the old linear
-    /// scan's arbitrary pick between two colliding entries, and unlike a
-    /// blind overwrite it can never orphan the surviving owner's routing.
+    /// new entry is simply left unindexed. An unindexed entry is not found by
+    /// [`Self::find_report_subscription`]'s exact `(session, subscription id)`
+    /// lookup, but once the index owner is gone (cancelled, or removed to
+    /// resubscribe) the cross-session lookup finds it as the only match for
+    /// its node and subscription id and re-keys it to the session the report
+    /// arrived on, which indexes it. Failing that, its own liveness deadline
+    /// drives a resubscribe, which asks the device for a fresh id. This is no
+    /// worse than the old linear scan's arbitrary pick between two colliding
+    /// entries, and unlike a blind overwrite it can never orphan the surviving
+    /// owner's routing.
     fn insert_subscription(&mut self, sub_id: SubId, entry: SubEntry) {
         let new_key = (entry.session_id, entry.wire_sub_id);
         if let Some(old) = self.subscriptions.insert(sub_id, entry) {
@@ -7314,6 +7331,12 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// `begin_resubscribe` has removed this subscription, one subscription at a
     /// time, so the last of several stale siblings on a session removes it.
     ///
+    /// A subscription whose consumer is gone keeps the route: `begin_resubscribe`
+    /// reaps it (its control receiver is closed), so no retry follows and there
+    /// is nothing to clear the route for — evicting it would only cost the
+    /// node's other users a fresh CASE handshake. Its session still gets the
+    /// orphan test.
+    ///
     /// The eviction is here, not in `begin_resubscribe`, which
     /// [`Self::resubscribe_stranded`] also calls for a session already replaced.
     fn check_liveness(&mut self) {
@@ -7326,28 +7349,38 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             .collect();
         let fabric_id = self.sole_fabric().map(|f| f.fabric_id).ok();
         for id in stale {
-            let Some((node_id, sid)) = self
+            let Some((node_id, sid, consumer_gone)) = self
                 .subscriptions
                 .get(&id)
-                .map(|e| (e.node_id, e.session_id))
+                .map(|e| (e.node_id, e.session_id, e.tx.consumer_gone()))
             else {
                 continue;
             };
-            let evicted_route =
-                fabric_id.is_some_and(|f| self.evict_cached_route_if(f, node_id, sid));
+            let evicted_route = !consumer_gone
+                && fabric_id.is_some_and(|f| self.evict_cached_route_if(f, node_id, sid));
             self.begin_resubscribe(
                 id,
                 Error::Operational("subscription liveness timeout".into()),
             );
             let removed_orphan_session = self.remove_session_if_orphaned(sid);
-            tracing::debug!(
-                target: "matter_controller::actor",
-                node = format_args!("{node_id:016X}"),
-                sub_id = id.0,
-                evicted_route,
-                removed_orphan_session,
-                "subscription liveness timed out; its retry runs on a fresh CASE session",
-            );
+            if consumer_gone {
+                tracing::debug!(
+                    target: "matter_controller::actor",
+                    node = format_args!("{node_id:016X}"),
+                    sub_id = id.0,
+                    removed_orphan_session,
+                    "subscription liveness timed out; its consumer is gone, so it is reaped",
+                );
+            } else {
+                tracing::debug!(
+                    target: "matter_controller::actor",
+                    node = format_args!("{node_id:016X}"),
+                    sub_id = id.0,
+                    evicted_route,
+                    removed_orphan_session,
+                    "subscription liveness timed out; its retry runs on a fresh CASE session",
+                );
+            }
         }
     }
 
@@ -21927,6 +21960,20 @@ mod tests {
         }
     }
 
+    /// Stamp session `sid` with the peer identity a CASE session on the sole
+    /// fabric carries ([`matter_transport::PeerHint`]): `node_id` and the sole
+    /// fabric's id. The cross-session report lookup matches on both.
+    fn stamp_case_peer<D: Discovery>(
+        actor: &mut Actor<InMemoryDatagram, D>,
+        sid: SessionId,
+        node_id: u64,
+    ) {
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let peer = &mut actor.sessions.get_mut(sid).unwrap().peer;
+        peer.node_id = Some(matter_transport::NodeId(node_id));
+        peer.fabric_id = Some(fabric_id);
+    }
+
     /// Spec test 2 (D1 + review B2): a resubscribe whose `SubscribeResponse`
     /// does not parse is answered `InvalidAction` and rescheduled — not dropped
     /// — and keeps its advert cooldown stamp: a device that keeps answering
@@ -22797,7 +22844,7 @@ mod tests {
 
     /// Spec tests 5 and 7: a publisher may report on any session it holds with
     /// us. A report for a live subscription that arrives on a session other
-    /// than its own is matched by (peer node, subscription id), delivered,
+    /// than its own is matched by (fabric, peer node, subscription id), delivered,
     /// acked Success, and the subscription is re-keyed to that session —
     /// taking that session's peer address, since the device may have moved.
     /// (`InMemoryDatagram::send_to` ignores the address, so the stored peer is
@@ -22807,11 +22854,8 @@ mod tests {
         let mut w = wired_actor();
         let arriving = w.sid;
         let moved_to: SocketAddr = "10.0.0.9:5540".parse().unwrap();
-        {
-            let session = w.actor.sessions.get_mut(arriving).unwrap();
-            session.peer.node_id = Some(matter_transport::NodeId(0x42));
-            session.peer_addr = Some(moved_to);
-        }
+        stamp_case_peer(&mut w.actor, arriving, 0x42);
+        w.actor.sessions.get_mut(arriving).unwrap().peer_addr = Some(moved_to);
         let established_on = register_test_session(&mut w.actor);
         let (sink, mut reports, _ctrl) = test_report_sink();
         w.actor.insert_subscription(
@@ -22860,8 +22904,7 @@ mod tests {
     async fn a_report_on_another_session_without_an_address_rekeys_to_its_source() {
         let mut w = wired_actor();
         let arriving = w.sid;
-        w.actor.sessions.get_mut(arriving).unwrap().peer.node_id =
-            Some(matter_transport::NodeId(0x42));
+        stamp_case_peer(&mut w.actor, arriving, 0x42);
         let established_on = register_test_session(&mut w.actor);
         let (sink, _reports, _ctrl) = test_report_sink();
         w.actor.insert_subscription(
@@ -22887,8 +22930,7 @@ mod tests {
     async fn a_report_matching_two_subscriptions_elsewhere_is_unknown() {
         let mut w = wired_actor();
         let arriving = w.sid;
-        w.actor.sessions.get_mut(arriving).unwrap().peer.node_id =
-            Some(matter_transport::NodeId(0x42));
+        stamp_case_peer(&mut w.actor, arriving, 0x42);
         let first_session = register_test_session(&mut w.actor);
         let second_session = register_test_session(&mut w.actor);
         let (sink_a, mut reports_a, _ctrl_a) = test_report_sink();
@@ -22915,6 +22957,42 @@ mod tests {
         assert!(reports_a.try_recv().is_err() && reports_b.try_recv().is_err());
         assert_eq!(w.actor.subscriptions[&SubId(1)].session_id, first_session);
         assert_eq!(w.actor.subscriptions[&SubId(2)].session_id, second_session);
+    }
+
+    /// Final review (C2): the cross-session lookup matches (fabric, node,
+    /// subscription id), as chip does. A report on a session whose peer is the
+    /// same node id on another fabric is unknown — answered
+    /// `InvalidSubscription`, nothing delivered, nothing re-keyed.
+    #[tokio::test]
+    async fn a_report_on_a_session_of_another_fabric_is_unknown() {
+        let mut w = wired_actor();
+        let arriving = w.sid;
+        stamp_case_peer(&mut w.actor, arriving, 0x42);
+        let other_fabric = w.actor.sole_fabric().unwrap().fabric_id ^ 1;
+        w.actor.sessions.get_mut(arriving).unwrap().peer.fabric_id = Some(other_fabric);
+        let established_on = register_test_session(&mut w.actor);
+        let (sink, mut reports, _ctrl) = test_report_sink();
+        w.actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, established_on, 0x1234_5678, 0x42, far_future()),
+        );
+        let report = build_report_data(1, 0x06, 0x0000, &matter_codec::Value::Bool(true));
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::INTERACTION_MODEL, OP_REPORT_DATA, &report),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((exchange, IM_STATUS_INVALID_SUBSCRIPTION))
+        );
+        assert!(reports.try_recv().is_err(), "nothing delivered");
+        assert_eq!(
+            w.actor.subscriptions[&SubId(1)].session_id,
+            established_on,
+            "not re-keyed"
+        );
     }
 
     /// Review focus 1: after a cancel purged an in-flight attempt, a priming
@@ -23015,6 +23093,32 @@ mod tests {
         actor.resubscribe_stranded(sid);
         assert!(actor.resubscribes.iter().any(|pr| pr.sub_id == SubId(1)));
         assert!(actor.cache.contains_key(&(fabric_id, 0x42)), "route kept");
+    }
+
+    /// Final review (C1): a liveness timeout on a subscription whose consumer
+    /// is gone keeps the route — `begin_resubscribe` reaps it, so no retry
+    /// follows and there is nothing to run a fresh CASE for. The session the
+    /// route points at stays with it.
+    #[test]
+    fn a_liveness_timeout_on_a_consumer_gone_subscription_keeps_the_route() {
+        let mut actor = actor_with_one_fabric();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let (sink, reports, ctrl) = test_report_sink();
+        drop((reports, ctrl));
+        actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, sid, 0x77, 0x42, Instant::now()),
+        );
+        actor.check_liveness();
+        assert_eq!(
+            actor.cache.get(&(fabric_id, 0x42)).map(|c| c.session_id),
+            Some(sid),
+            "route kept"
+        );
+        assert!(actor.sessions.get(sid).is_some(), "its session stays");
+        assert!(actor.subscriptions.is_empty(), "the subscription is reaped");
+        assert!(actor.resubscribes.is_empty(), "no retry is scheduled");
     }
 
     /// Spec test 6 (D4): a route already replaced by a newer session is kept
@@ -23219,8 +23323,7 @@ mod tests {
     async fn a_rekey_removes_the_orphaned_old_session() {
         let mut w = wired_actor();
         let arriving = w.sid;
-        w.actor.sessions.get_mut(arriving).unwrap().peer.node_id =
-            Some(matter_transport::NodeId(0x42));
+        stamp_case_peer(&mut w.actor, arriving, 0x42);
         let established_on = register_test_session(&mut w.actor);
         let (sink, _reports, _ctrl) = test_report_sink();
         w.actor.insert_subscription(
