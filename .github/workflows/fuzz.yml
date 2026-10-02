@@ -54,3 +54,31 @@ jobs:
           name: cluster-fuzz-artifacts
           path: crates/matter-clusters/fuzz/artifacts/
           if-no-files-found: ignore
+
+  commissioning:
+    name: ${{ matrix.target }} (5 min)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Untrusted input the commissioner parses: setup payloads (QR /
+        # manual code), the device's DAC, and the NOCSR response.
+        target: [fuzz_parse_qr, fuzz_parse_manual, fuzz_dac_from_der, nocsr_parse]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/matter-commissioning/fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: Run ${{ matrix.target }} for 5 minutes
+        working-directory: crates/matter-commissioning/fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300
+      - name: Upload artifacts on crash
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: commissioning-fuzz-artifacts-${{ matrix.target }}
+          path: crates/matter-commissioning/fuzz/artifacts/
+          if-no-files-found: ignore
