@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(result.vendor_id, VendorId::new(0xFFF1));
         assert_eq!(result.product_id, ProductId::new(0x8000));
         assert_eq!(result.dac_public_key.len(), 65);
-        assert!(!result.paa_subject.is_empty());
+        assert_ne!(result.paa_subject, b"");
     }
 
     // ── Fix A — VID-scoped PAA scope (Matter §6.2.2.1) ──────────────────────

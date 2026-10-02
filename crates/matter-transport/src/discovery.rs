@@ -447,7 +447,7 @@ mod tests {
 
         let mut d = PreFoundDiscovery;
         let h = d.query(ServiceKind::Operational).unwrap();
-        assert!(d.poll_found(h).is_empty());
+        assert_eq!(d.poll_found(h), Vec::<String>::new());
         assert!(
             d.poll_found(QueryHandle(999)).is_empty(),
             "unknown handle too"

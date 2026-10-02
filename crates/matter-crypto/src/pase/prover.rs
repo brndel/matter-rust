@@ -813,7 +813,7 @@ mod tests {
             bytes[0], 0x15,
             "first byte must be anonymous structure tag 0x15"
         );
-        assert!(!bytes.is_empty());
+        assert_ne!(bytes, b"");
     }
 
     #[test]

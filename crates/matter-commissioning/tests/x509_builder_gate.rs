@@ -193,5 +193,5 @@ fn built_chain_passes_real_verify_chain() {
     assert_eq!(result.vendor_id, VendorId::new(VID));
     assert_eq!(result.product_id, ProductId::new(PID));
     assert_eq!(result.dac_public_key.len(), 65);
-    assert!(!result.paa_subject.is_empty());
+    assert_ne!(result.paa_subject, b"");
 }

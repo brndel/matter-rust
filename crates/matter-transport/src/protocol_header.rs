@@ -302,7 +302,7 @@ mod tests {
         assert_eq!(out, vec![0x01, 0x20, 0x42, 0x42, 0x01, 0x00]);
         let (parsed, rest) = decode_protocol_header(&out).unwrap();
         assert_eq!(parsed, header);
-        assert!(rest.is_empty());
+        assert_eq!(rest, b"");
     }
 
     #[test]
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(out.len(), 10, "6 fixed (V=0) + 4 ack_counter");
         let (parsed, rest) = decode_protocol_header(&out).unwrap();
         assert_eq!(parsed, header);
-        assert!(rest.is_empty());
+        assert_eq!(rest, b"");
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(out[0], 0b0000_0101, "I=1 R=1");
         let (parsed, rest) = decode_protocol_header(&out).unwrap();
         assert_eq!(parsed, header);
-        assert!(rest.is_empty());
+        assert_eq!(rest, b"");
     }
 
     #[test]
@@ -476,7 +476,7 @@ mod tests {
         assert!(parsed.exchange_flags.contains(ExchangeFlags::VENDOR));
         assert_eq!(parsed.protocol_id.vendor, 0x1234);
         assert_eq!(parsed.protocol_id.protocol, 0x5678);
-        assert!(rest.is_empty());
+        assert_eq!(rest, b"");
     }
 
     #[test]

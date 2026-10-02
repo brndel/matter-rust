@@ -115,7 +115,7 @@ mod tests {
         let ci = recv_checkin_once(&a, &regs, 4).await.expect("check-in");
         assert_eq!(ci.node_id, 0x0042);
         assert_eq!(ci.counter, 11);
-        assert!(ci.app_data.is_empty());
+        assert_eq!(ci.app_data, b"");
         emitter.await.unwrap();
     }
 

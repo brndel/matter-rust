@@ -1985,7 +1985,7 @@ mod tests {
 
         // next_message() must return Sigma2_Resume bytes.
         let outbound = responder.next_message().unwrap();
-        assert!(!outbound.is_empty());
+        assert_ne!(outbound, b"");
 
         // The bytes must decode as a Sigma2_Resume.
         let sigma2_resume = Sigma2Resume::decode(&outbound).unwrap();

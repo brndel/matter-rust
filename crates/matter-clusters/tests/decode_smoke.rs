@@ -159,9 +159,10 @@ fn electrical_power_measurement_decodes() {
         Nullable::Value(230_000)
     );
     // Accuracy: list<MeasurementAccuracyStruct> -> Vec<…>; empty array -> empty Vec.
-    assert!(epm::decode_accuracy(&uint_array_attr(&[]))
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        epm::decode_accuracy(&uint_array_attr(&[])).unwrap(),
+        Vec::<epm::MeasurementAccuracyStruct>::new()
+    );
     // HarmonicCurrents: nullable list -> Nullable<Vec<…>> (gap 8); null decodes to Null.
     assert!(matches!(
         epm::decode_harmonic_currents(&null_attr()).unwrap(),

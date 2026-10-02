@@ -338,7 +338,7 @@ fn decode_inbound_duplicate_reliable_emits_resend_packet() {
         } => {
             assert_eq!(session_id, bob_sid);
             assert_eq!(exchange_id, out.exchange_id);
-            assert!(!ack_packet.is_empty());
+            assert_ne!(ack_packet, b"");
         }
         other => panic!("expected DuplicateReliableAckResent, got {other:?}"),
     }

@@ -134,7 +134,7 @@ mod tests {
     fn decode_matches_chip_vector1() {
         let (counter, app) = decode_checkin(&key16(KEY1), &unhex(PAYLOAD1)).unwrap();
         assert_eq!(counter, 12);
-        assert!(app.is_empty());
+        assert_eq!(app, b"");
     }
 
     #[test]

@@ -356,8 +356,8 @@ mod tests {
         assert_eq!(fabric.fabric_id, 0xDEAD_BEEF_0000_0001);
         assert_eq!(fabric.commissioner.node_id, 1);
         assert!(fabric.devices.is_empty());
-        assert!(!fabric.rcac_pkcs8.is_empty());
-        assert!(!fabric.commissioner.operational_pkcs8.is_empty());
+        assert_ne!(fabric.rcac_pkcs8, b"");
+        assert_ne!(fabric.commissioner.operational_pkcs8, b"");
     }
 
     #[test]

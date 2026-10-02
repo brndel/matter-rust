@@ -176,17 +176,24 @@ impl AsyncDatagram for InMemoryDatagram {
     #[allow(clippy::unused_async_trait_impl)]
     async fn send_to(&self, buf: &[u8], _peer: SocketAddr) -> io::Result<()> {
         // Atomic decrement-if-nonzero: consumes exactly one drop credit even
-        // under concurrent sends.
-        let consumed_drop = self
-            .drops_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                if v > 0 {
-                    Some(v - 1)
-                } else {
-                    None
-                }
-            })
-            .is_ok();
+        // under concurrent sends. A compare-exchange loop rather than
+        // `fetch_update` (deprecated in Rust 1.99) or its replacement
+        // `try_update` (newer than our MSRV); the semantics are the same.
+        let mut cur = self.drops_remaining.load(Ordering::SeqCst);
+        let consumed_drop = loop {
+            if cur == 0 {
+                break false;
+            }
+            match self.drops_remaining.compare_exchange_weak(
+                cur,
+                cur - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break true,
+                Err(actual) => cur = actual,
+            }
+        };
         if consumed_drop {
             return Ok(());
         }

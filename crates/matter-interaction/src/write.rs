@@ -726,7 +726,10 @@ mod tests {
         w.put_uint(Tag::Context(0xFF), 11).unwrap();
         w.end_container().unwrap();
         let statuses = parse_write_response(&buf).unwrap();
-        assert!(statuses.is_empty());
+        assert_eq!(
+            statuses,
+            Vec::<(crate::path::AttributePath, crate::status::ImStatus)>::new()
+        );
     }
 
     /// Drive the private `parse_status_ib_body` over a writer-built `StatusIB`.

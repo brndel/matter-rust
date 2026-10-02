@@ -1948,7 +1948,7 @@ mod mock_device_response_table {
 
         let decoded = decode_csr_response(&fields_tlv).expect("CSRResponse decodes");
         assert_eq!(decoded.attestation_signature.len(), 64);
-        assert!(!decoded.nocsr_elements.is_empty());
+        assert_ne!(decoded.nocsr_elements, b"");
     }
 
     // ── NOCResponse ───────────────────────────────────────────────────────────

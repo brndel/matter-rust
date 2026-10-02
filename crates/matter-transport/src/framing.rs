@@ -992,7 +992,7 @@ mod tests {
 
         let (parsed, rest) = decode_header(&bytes).unwrap();
         assert_eq!(parsed, header);
-        assert!(rest.is_empty());
+        assert_eq!(rest, b"");
     }
 
     #[test]
@@ -1009,7 +1009,7 @@ mod tests {
         assert_eq!(bytes.len(), 16, "8 fixed + 8 source");
         let (parsed, rest) = decode_header(&bytes).unwrap();
         assert_eq!(parsed, header);
-        assert!(rest.is_empty());
+        assert_eq!(rest, b"");
     }
 
     #[test]
@@ -1026,7 +1026,7 @@ mod tests {
         assert_eq!(bytes.len(), 16, "8 fixed + 8 dest");
         let (parsed, rest) = decode_header(&bytes).unwrap();
         assert_eq!(parsed, header);
-        assert!(rest.is_empty());
+        assert_eq!(rest, b"");
     }
 
     #[test]
@@ -1043,7 +1043,7 @@ mod tests {
         assert_eq!(bytes.len(), 10, "8 fixed + 2 group");
         let (parsed, rest) = decode_header(&bytes).unwrap();
         assert_eq!(parsed, header);
-        assert!(rest.is_empty());
+        assert_eq!(rest, b"");
     }
 
     #[test]
@@ -1060,7 +1060,7 @@ mod tests {
         assert_eq!(bytes.len(), 24, "8 fixed + 8 source + 8 dest");
         let (parsed, rest) = decode_header(&bytes).unwrap();
         assert_eq!(parsed, header);
-        assert!(rest.is_empty());
+        assert_eq!(rest, b"");
     }
 
     #[test]

@@ -1007,7 +1007,7 @@ mod tests {
         d.stop_query(h); // second call is a no-op, must not panic
                          // poll_results on a stopped handle returns empty.
         let results = d.poll_results(h);
-        assert!(results.is_empty());
+        assert_eq!(results, Vec::<crate::discovery::MatterService>::new());
     }
 
     // ---------------------------------------------------------------------
@@ -1334,7 +1334,10 @@ mod tests {
             "the surviving handle must still receive records",
         );
         // The released handle is inert, not merely quiet.
-        assert!(d.poll_results(short_lived).is_empty());
+        assert_eq!(
+            d.poll_results(short_lived),
+            Vec::<crate::discovery::MatterService>::new()
+        );
 
         d.stop_query(long_lived);
         assert_eq!(
@@ -1567,7 +1570,7 @@ mod tests {
         assert!(!names(&d.poll_found(b), "t1-found"), "returned once");
         d.stop_query(a);
         // A stopped handle is inert: its buffer went with it.
-        assert!(d.poll_found(a).is_empty());
+        assert_eq!(d.poll_found(a), Vec::<String>::new());
         d.stop_query(b);
     }
 

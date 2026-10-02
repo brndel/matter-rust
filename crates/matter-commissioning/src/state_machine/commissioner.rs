@@ -1658,7 +1658,7 @@ mod tests {
                 assert_eq!(endpoint, 0);
                 assert_eq!(cluster, 0x0030);
                 assert_eq!(expect, Expectation::CommissioningInfo);
-                assert!(!attributes.is_empty());
+                assert_ne!(attributes, &[] as &[u32]);
             }
             other => panic!("expected ReadAttribute, got {other:?}"),
         }

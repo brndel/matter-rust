@@ -19960,7 +19960,10 @@ mod tests {
         actor.drive_resubscribes().await;
         assert_eq!(actor.pending.len(), 1, "a SubscribeRequest is in flight");
         actor.reconcile_resubscribe_watch(Instant::now());
-        assert!(state.lock().unwrap().stops.is_empty());
+        assert_eq!(
+            state.lock().unwrap().stops,
+            Vec::<matter_transport::QueryHandle>::new()
+        );
 
         // It times out (the route is gone too), comes back to the queue, fires
         // again and parks behind a connect, which reuses the held subtype.
@@ -21732,7 +21735,7 @@ mod tests {
         );
         assert!(actor.sessions.get(sid).is_some(), "nor its session");
         assert!(actor.resubscribes.is_empty(), "not rescheduled");
-        assert!(actor.reschedule_causes.is_empty());
+        assert_eq!(actor.reschedule_causes, Vec::<(SubId, String)>::new());
         assert!(actor.pending.is_empty());
         assert!(
             actor.resubscribe_pulled_at.is_empty(),

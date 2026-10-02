@@ -1141,7 +1141,7 @@ mod tests {
         let (pkt, _) = b.recv_from().await.unwrap();
         let msg = decode_unsecured(&pkt).unwrap();
         assert_eq!(msg.opcode, 0x10);
-        assert!(msg.payload.is_empty());
+        assert_eq!(msg.payload, b"");
         assert_eq!(msg.message_counter, 5);
         assert_eq!(msg.ack_counter, Some(7));
         assert!(msg.is_initiator);
