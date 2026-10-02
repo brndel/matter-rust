@@ -53,6 +53,23 @@ slots, match `SubscribeRejected(0x89)` instead. A subscription that is already
 established and is rejected while re-establishing itself still retries on its
 backoff, as chip does; the rejection shows only in the `debug` log.
 
+### Changed — sibling subscriptions count against the device's capacity
+
+Now that several subscriptions to one node really coexist (see Fixed), each
+one holds a subscription slot on the device. Matter guarantees at least 3
+subscriptions per fabric; a device may support more. If you hold more
+subscriptions to a node than it supports, a `Node::subscribe` that does not fit
+is now rejected, typically with `Error::SubscribeRejected(0x89)`
+(`ResourceExhausted`), where before each new subscription silently terminated
+the older ones. A resubscribe rejected this way retries on its backoff, as
+above.
+
+### Changed — an unparseable priming report fails the first subscribe
+
+`Node::subscribe` whose priming report does not parse now returns
+`Err(Error::InteractionModel(..))`. Before, it returned `Ok` with a
+subscription established on a partial snapshot.
+
 ### Fixed
 
 - **Several subscriptions to one node no longer tear each other down.** Every
@@ -72,9 +89,12 @@ backoff, as chip does; the rejection shows only in the `debug` log.
   establishing the subscription on an incomplete snapshot; it now fails the
   attempt. A `StatusResponse` to a resubscribe used to be ignored until the
   30 s deadline, after which the node's session was torn down under any other
-  subscriptions and requests using it; it is now retried at once on the backoff
-  and the session is left alone. Each such message is answered with
-  `StatusResponse(InvalidAction)` (`0x80`).
+  subscriptions and requests using it; now the attempt fails at once and is
+  retried on its backoff, and the session is left alone. Each such message is
+  answered with `StatusResponse(InvalidAction)` (`0x80`). A message on a
+  subscribe exchange that is not an Interaction Model message is now ignored
+  whatever its opcode; before, a non-IM message with opcode `0x04` or `0x05`
+  was taken for a `SubscribeResponse` or a priming report.
 - **Cancelling or dropping a `Subscription` mid-reconnect really cancels it.**
   A retry already on the wire or waiting for a connection could still go out,
   re-create a subscription on the device, and (with the bug above) tear down
@@ -89,27 +109,28 @@ backoff, as chip does; the rejection shows only in the `debug` log.
   quiet, its first retry went out on the very session that had gone quiet,
   spending about 6 s of retransmissions (or 30 s) before reconnecting. It now
   reconnects at once with a fresh CASE session (session resumption keeps that
-  cheap), as chip does. The old session stays for whatever else still uses it
-  and is dropped once nothing does.
+  cheap), as chip does. The old session stays for whatever else still uses it,
+  and is removed right away if nothing does. Because the reconnect goes through
+  operational discovery, every liveness recovery now needs the node to resolve
+  over operational mDNS; before, the first retry went out on the cached session
+  and needed no resolve when that session still worked. This also matches chip.
 - **A timed-out resubscribe no longer takes the session with it.** When a
   resubscribe attempt timed out, the node's session was removed along with its
   route, under any sibling subscriptions and in-flight requests still using it.
   Now only the route is dropped, so the next attempt runs a fresh CASE
-  handshake while everything else keeps the session. After any such route-only
-  drop (here, after a liveness timeout, and after a request times out), and
-  when a subscription moves to another session, the old session is removed as
-  soon as no route, subscription or request in flight refers to it, so stale
-  sessions no longer accumulate in the session table.
+  handshake while everything else keeps the session. The session is checked
+  at the points where it may have lost its last user — after a liveness
+  timeout, after a resubscribe attempt times out, after a request's first
+  timeout (when it reconnects and re-sends), and when a subscription moves to
+  another session — and is removed there if no route, subscription or request
+  in flight refers to it any more. A few other paths still leave an
+  unreferenced session to the session table's cap, as before.
 
-Two consequences of matching chip, both deliberate:
-
-- A report that reaches us before the retransmission of a lost
-  `SubscribeResponse` is for a subscription we do not hold yet, so it is now
-  answered `InvalidSubscription` and the device drops that new subscription. It
-  recovers through its liveness timeout and resubscribes.
-- A message on a subscribe exchange that is not an Interaction Model message is
-  ignored whatever its opcode. Before, a non-IM message with opcode `0x04` or
-  `0x05` was taken for a `SubscribeResponse` or a priming report.
+One consequence of matching chip, deliberate: a report that reaches us before
+the retransmission of a lost `SubscribeResponse` is for a subscription we do
+not hold yet, so it is now answered `InvalidSubscription` and the device drops
+that new subscription. It recovers through its liveness timeout and
+resubscribes.
 
 ### Documented — one controller process per operational identity
 
