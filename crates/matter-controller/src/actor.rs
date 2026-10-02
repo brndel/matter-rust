@@ -4369,8 +4369,11 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// connect while anything still in flight on `sid` finishes or times out on
     /// its own terms. The "still points at `sid`" check stops a late caller from
     /// evicting a healthy session a sibling already put in its place. The
-    /// orphaned session stays until the session table's idle-first eviction:
-    /// `handle_connect_done` finds no route for it, so it does not remove it.
+    /// session is never removed here (`handle_connect_done` finds no route for
+    /// it, so it does not remove it either): [`Self::check_liveness`] and both
+    /// branches of [`Self::on_pending_timeout`] follow up with
+    /// [`Self::remove_session_if_orphaned`]; a pull
+    /// ([`Self::evict_route_for_pull`]) leaves it to the session table.
     fn evict_cached_route_if(&mut self, fabric_id: u64, node_id: u64, sid: SessionId) -> bool {
         let key = (fabric_id, node_id);
         if self.cache.get(&key).is_some_and(|c| c.session_id == sid) {
@@ -4399,6 +4402,29 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             return false;
         }
         self.evict_cached_route_if(fabric_id, node_id, sid)
+    }
+
+    /// Remove session `sid` if nothing references it any more: no cached route
+    /// points at it, no subscription rides it, and no pending operation is
+    /// keyed on it. Returns whether it was removed.
+    ///
+    /// Run after every route-only eviction — [`Self::check_liveness`], both
+    /// branches of [`Self::on_pending_timeout`] — and after
+    /// [`Self::find_report_subscription`] re-keys a subscription away from a
+    /// session (spec §4.6, review S7). Left alone, such
+    /// orphans would linger until the session table's cap, whose
+    /// oldest-idle-first eviction takes long-lived subscription sessions (idle
+    /// between reports) before the newer orphans. What this cannot see is
+    /// MRP-only traffic on the session (acks to reports, answers to stray
+    /// reports); dropping that with no subscription left is harmless — a device
+    /// still reporting there gets no ack and closes its subscription itself. A
+    /// later MRP retransmit for a removed session finds no peer and is skipped;
+    /// a later expiry finds no pending and returns.
+    fn remove_session_if_orphaned(&mut self, sid: SessionId) -> bool {
+        let referenced = self.cache.values().any(|c| c.session_id == sid)
+            || self.subscriptions.values().any(|e| e.session_id == sid)
+            || self.pending.keys().any(|(s, _)| *s == sid);
+        !referenced && self.sessions.remove(sid).is_some()
     }
 
     /// Every subscription id currently in a resubscribe episode, live consumer
@@ -6489,6 +6515,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             return None;
         }
         let mut entry = self.remove_subscription(sub_id)?;
+        let old_session = entry.session_id;
         entry.session_id = session_id;
         entry.peer = self
             .sessions
@@ -6496,6 +6523,8 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             .and_then(|s| s.peer_addr)
             .unwrap_or(from);
         self.insert_subscription(sub_id, entry);
+        // Moved away, the old session may now be referenced by nothing.
+        self.remove_session_if_orphaned(old_session);
         Some(sub_id)
     }
 
@@ -7030,28 +7059,25 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 PendingReply::Subscribe { report_tx, .. } if report_tx.consumer_gone()
             );
             // The attempt timed out — the cached session is likely dead (most
-            // commonly a device reboot, which invalidates CASE). Evict it so
-            // the next attempt forces a fresh handshake; otherwise we would
-            // retry forever on a session the device can no longer decrypt.
-            // Only evict if the cache still holds the *expired* session; a
-            // sibling timeout may already have replaced it with a fresh
-            // healthy session, which we must not tear down (see the
-            // round-trip branch below for the full rationale).
+            // commonly a device reboot, which invalidates CASE). Drop the
+            // ROUTE so the next attempt runs a fresh handshake, as the
+            // round-trip branch below does (spec §4.6); leave the session
+            // registered — other subscriptions and in-flight invokes may still
+            // be using it, and if it is dead they exhaust on their own and
+            // reconnect through that branch. Only if the cache still holds the
+            // expired session: a sibling may already have replaced it with a
+            // healthy one. With the route kept, `handle_connect_done` strands
+            // nothing (it strands only when the cache still holds the old route).
             if !consumer_gone {
                 if let Ok(fabric_id) = self.sole_fabric().map(|f| f.fabric_id) {
-                    if self
-                        .cache
-                        .get(&(fabric_id, p.node_id))
-                        .is_some_and(|c| c.session_id == session_id)
-                    {
-                        if let Some(old) = self.cache.remove(&(fabric_id, p.node_id)) {
-                            self.sessions.remove(old.session_id);
-                        }
-                    }
+                    self.evict_cached_route_if(fabric_id, p.node_id, session_id);
                 }
             }
             self.fail_subscribe_attempt((session_id, exchange_id), p, cause)
                 .await;
+            // With this attempt's pending gone, nothing may reference the
+            // session any more.
+            self.remove_session_if_orphaned(session_id);
             return;
         }
         // ChunkedWrite pendings are always inserted with `retried: true` —
@@ -7071,6 +7097,10 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             // would force a redundant CASE handshake and churn every subscription
             // just bound to the new session.
             self.evict_cached_route_if(fabric_id, p.node_id, session_id);
+            // `p` is already out of `pending` and its re-send targets the new
+            // session, so the old one may now be referenced by nothing
+            // (spec §4.6). The reconnect and re-send below are unchanged (B1).
+            self.remove_session_if_orphaned(session_id);
             // M9-G-d: re-send on a cached fresh session if a sibling already
             // reconnected, else reconnect OFF the actor loop (the handshake no
             // longer blocks other sessions) and re-send on completion.
@@ -7267,6 +7297,25 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     }
 
     /// Re-subscribe any subscription whose liveness deadline has passed.
+    ///
+    /// Before each one enters its resubscribe episode, its own cached route is
+    /// dropped — if, and only if, it still points at that subscription's
+    /// session — so the immediate retry misses the cache and runs a fresh CASE
+    /// handshake (cheap with resumption) instead of first spending MRP's
+    /// retransmissions, or the response deadline, on a session that has most
+    /// likely died. This is chip's `TriggerResubscriptionForLivenessTimeout`,
+    /// which marks the timed-out subscription's own session defunct and
+    /// resubscribes with `reestablishCASE` (spec §4.6). Like chip there is no
+    /// sibling guard; a route a newer session already replaced is spared, as
+    /// chip spares sessions with newer peer activity. The session stays
+    /// registered for siblings and in-flight work — chip's "defunct" is soft
+    /// too — and is removed once nothing references it
+    /// ([`Self::remove_session_if_orphaned`]). That test runs after
+    /// `begin_resubscribe` has removed this subscription, one subscription at a
+    /// time, so the last of several stale siblings on a session removes it.
+    ///
+    /// The eviction is here, not in `begin_resubscribe`, which
+    /// [`Self::resubscribe_stranded`] also calls for a session already replaced.
     fn check_liveness(&mut self) {
         let now = Instant::now();
         let stale: Vec<SubId> = self
@@ -7275,10 +7324,29 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             .filter(|(_, e)| e.liveness_deadline <= now)
             .map(|(id, _)| *id)
             .collect();
+        let fabric_id = self.sole_fabric().map(|f| f.fabric_id).ok();
         for id in stale {
+            let Some((node_id, sid)) = self
+                .subscriptions
+                .get(&id)
+                .map(|e| (e.node_id, e.session_id))
+            else {
+                continue;
+            };
+            let evicted_route =
+                fabric_id.is_some_and(|f| self.evict_cached_route_if(f, node_id, sid));
             self.begin_resubscribe(
                 id,
                 Error::Operational("subscription liveness timeout".into()),
+            );
+            let removed_orphan_session = self.remove_session_if_orphaned(sid);
+            tracing::debug!(
+                target: "matter_controller::actor",
+                node = format_args!("{node_id:016X}"),
+                sub_id = id.0,
+                evicted_route,
+                removed_orphan_session,
+                "subscription liveness timed out; its retry runs on a fresh CASE session",
             );
         }
     }
@@ -11316,69 +11384,29 @@ mod tests {
     }
 
     /// Device that answers two subscribe cycles: it establishes (priming report
-    /// then `SubscribeResponse`), goes silent so the controller's liveness fires,
-    /// then answers the controller's auto-resubscribe with a fresh
-    /// `SubscribeResponse` (new wire id) + a re-primed report, then returns.
-    /// Only reacts to `SubscribeRequest`s (opcode 0x03); drains acks/other frames.
-    #[allow(clippy::too_many_lines)] // CASE-handshake boilerplate, as the sibling mocks.
+    /// then `SubscribeResponse`, max interval 0), goes silent so the
+    /// controller's liveness fires, then answers the controller's
+    /// auto-resubscribe with a fresh `SubscribeResponse` (new wire id) + a
+    /// re-primed report, then returns.
+    ///
+    /// The liveness retry runs on a fresh CASE session (the controller drops
+    /// the timed-out subscription's route, spec 2026-10-02 §4.6), so the device
+    /// accepts a second handshake — with `second_life`, since credentials
+    /// cannot be cloned — and answers on that session. Reacts only to `Sigma1`
+    /// and `SubscribeRequest` (opcode 0x03); drains acks and other frames.
     async fn run_resubscribe_device(
         io: InMemoryDatagram,
         ctrl_addr: std::net::SocketAddr,
-        creds: CaseCredentials,
-        roots: TrustedRoots,
-        responder_session_id: u16,
+        first_life: (CaseCredentials, TrustedRoots),
+        second_life: (CaseCredentials, TrustedRoots),
     ) {
-        let mut responder = CaseResponder::new(
-            creds,
-            roots,
-            responder_session_id,
-            MatterTime::from_unix_secs(2_000_000_000),
-        )
-        .unwrap();
-        // --- CASE handshake (identical to run_subscription_device) ---
-        let (p, _) = io.recv_from().await.unwrap();
-        let m = decode_unsecured(&p).unwrap();
-        assert!(matches!(
-            responder.handle_sigma1(&m.payload).unwrap(),
-            Sigma1Outcome::NewSession
-        ));
-        let sigma2 = responder.next_message().unwrap();
-        let wire = encode_unsecured(
-            200,
-            m.exchange_id,
-            0x31,
-            ProtocolId::SECURE_CHANNEL,
-            false,
-            true,
-            Some(m.message_counter),
-            None,
-            &sigma2,
-        );
-        io.send_to(&wire, ctrl_addr).await.unwrap();
-        let (p, _) = io.recv_from().await.unwrap();
-        let m = decode_unsecured(&p).unwrap();
-        responder.handle_sigma3(&m.payload).unwrap();
-        let mut body = Vec::new();
-        body.extend_from_slice(&0u16.to_le_bytes());
-        body.extend_from_slice(&0u32.to_le_bytes());
-        body.extend_from_slice(&0u16.to_le_bytes());
-        let report = encode_unsecured(
-            201,
-            m.exchange_id,
-            0x40,
-            ProtocolId::SECURE_CHANNEL,
-            false,
-            true,
-            Some(m.message_counter),
-            None,
-            &body,
-        );
-        io.send_to(&report, ctrl_addr).await.unwrap();
-        let _ack = io.recv_from().await.unwrap();
-        let output = responder.finish().unwrap();
-
-        let mut sessions = SessionManager::new();
-        let sid = sessions.register_case(&output, SessionRole::Responder);
+        let Some(sigma1) = recv_sigma1(&io).await else {
+            return;
+        };
+        let (creds, roots) = first_life;
+        let (mut sessions, mut sid) =
+            accept_case_from(&io, ctrl_addr, creds, roots, 0x00D2, &sigma1).await;
+        let mut second_life = Some(second_life);
 
         // Two subscribe cycles with distinct wire subscription ids.
         let wire_ids = [0x1111_1111_u32, 0x2222_2222_u32];
@@ -11392,7 +11420,15 @@ mod tests {
                 return; // timeout or io error → device is done
             };
             if wire.len() >= 3 && wire[1] == 0 && wire[2] == 0 {
-                continue; // unsecured straggler
+                // Unsecured: the liveness retry's fresh CASE handshake.
+                let is_sigma1 = matches!(decode_unsecured(&wire), Ok(m) if m.opcode == 0x30);
+                if is_sigma1 {
+                    if let Some((creds, roots)) = second_life.take() {
+                        (sessions, sid) =
+                            accept_case_from(&io, ctrl_addr, creds, roots, 0x00D3, &wire).await;
+                    }
+                }
+                continue;
             }
             let Ok(decoded) = sessions.decode_inbound(&wire, Instant::now()) else {
                 continue;
@@ -13573,12 +13609,15 @@ mod tests {
             device_node_id,
         } = loopback_harness();
 
+        // The liveness retry runs a fresh CASE handshake (spec 2026-10-02
+        // §4.6); the device needs a second set of credentials for it.
+        let state = crate::snapshot::deserialize(&store.load().unwrap().unwrap()).unwrap();
+        let second_life = mint_device_creds(&state, device_node_id);
         let device = tokio::spawn(run_resubscribe_device(
             dev_io,
             ctrl_addr,
-            device_creds,
-            device_roots,
-            0x00D2,
+            (device_creds, device_roots),
+            second_life,
         ));
 
         let controller = crate::controller::MatterController::with_components(
@@ -21385,16 +21424,20 @@ mod tests {
 
     /// The device for the advert end-to-end test. First life: accept CASE and
     /// one subscription at max interval 0 (liveness trips after
-    /// `LIVENESS_GRACE`). Then it loses power: it forgets the session and
-    /// answers nothing on it — not even MRP acks — as a rebooted device would.
-    /// Second life: accept the controller's next CASE handshake and answer that
-    /// session's `SubscribeRequest` (max interval 60, so the test ends before
-    /// liveness could trip again).
+    /// `LIVENESS_GRACE`). Then it loses power: it forgets the session and,
+    /// until `power_back` fires, answers nothing at all — it reads and drops
+    /// every frame, so a handshake attempted meanwhile (the liveness retry's
+    /// fresh CASE, spec 2026-10-02 §4.6) fails as against a real dead device
+    /// and no stale `Sigma1` is left queued for the second life. Second life:
+    /// accept the controller's next CASE handshake and answer that session's
+    /// `SubscribeRequest` (max interval 60, so the test ends before liveness
+    /// could trip again).
     async fn run_rebooting_subscription_device(
         io: InMemoryDatagram,
         ctrl_addr: SocketAddr,
         first_life: (CaseCredentials, TrustedRoots),
         second_life: (CaseCredentials, TrustedRoots),
+        power_back: oneshot::Receiver<()>,
     ) {
         let Some(sigma1) = recv_sigma1(&io).await else {
             return;
@@ -21405,8 +21448,20 @@ mod tests {
         if !answer_subscribe(&io, ctrl_addr, &mut sessions, sid, 0x1111_1111, 0).await {
             return;
         }
-        // Power loss: everything the first life knew is gone.
+        // Power loss: everything the first life knew is gone, and nothing is
+        // answered until power returns.
         drop(sessions);
+        let mut power_back = power_back;
+        loop {
+            tokio::select! {
+                _ = &mut power_back => break,
+                received = io.recv_from() => {
+                    if received.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
         let Some(sigma1) = recv_sigma1(&io).await else {
             return;
         };
@@ -21452,11 +21507,13 @@ mod tests {
             .subtype_records
             .push(record.clone());
 
+        let (power_back, power_back_rx) = oneshot::channel::<()>();
         let device = tokio::spawn(run_rebooting_subscription_device(
             dev_io,
             ctrl_addr,
             (device_creds, device_roots),
             second_life,
+            power_back_rx,
         ));
         let controller = crate::controller::MatterController::with_components(
             store,
@@ -21497,9 +21554,10 @@ mod tests {
             "liveness must time out (got {lost:?})"
         );
 
-        // 2. The immediate retry fails against the dead session (MRP expiry)
-        //    and comes back to the queue. Push it 10 minutes out at retry 10,
-        //    as if several attempts had failed.
+        // 2. The immediate retry runs a fresh CASE handshake (spec 2026-10-02
+        //    §4.6), which the powered-off device never answers, and comes back
+        //    to the queue. Push it 10 minutes out at retry 10, as if several
+        //    attempts had failed.
         let backed_off = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if controller
@@ -21520,6 +21578,7 @@ mod tests {
 
         // 3. The device is back and re-announces: a new PTR on the fabric
         //    subtype, with its record.
+        let _ = power_back.send(());
         {
             let mut s = watch_state.lock().unwrap();
             s.subtype_records.push(record);
@@ -22902,5 +22961,281 @@ mod tests {
         .await
         .unwrap();
         assert!(w.next_sent(NOTHING_SENT_WITHIN).await.is_none());
+    }
+
+    /// Spec test 6 (D4): a liveness timeout drops the subscription's own route,
+    /// so the immediate retry misses the cache and waits on a fresh connect
+    /// (a fresh CASE) instead of going out on the probably-dead session; the
+    /// session, now referenced by nothing, is removed.
+    #[tokio::test]
+    async fn a_liveness_timeout_evicts_its_own_route_so_the_retry_runs_a_fresh_case() {
+        let mut actor = actor_with_one_fabric();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let (sink, _reports, _ctrl) = test_report_sink();
+        actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, sid, 0x77, 0x42, Instant::now()),
+        );
+        actor.check_liveness();
+        assert!(
+            !actor.cache.contains_key(&(fabric_id, 0x42)),
+            "own route evicted"
+        );
+        assert!(actor.sessions.get(sid).is_none(), "the orphan is removed");
+        tokio::time::timeout(SENT_WITHIN, actor.drive_resubscribes())
+            .await
+            .unwrap();
+        assert!(
+            actor.pending.is_empty(),
+            "the retry did not go out on the stale session"
+        );
+        assert_eq!(
+            actor.pending_connects[&0x42].len(),
+            1,
+            "it waits on a fresh connect"
+        );
+    }
+
+    /// Spec test 6 (D4): the eviction lives in `check_liveness`, not in
+    /// `begin_resubscribe`, which `resubscribe_stranded` also calls.
+    #[test]
+    fn a_stranded_resubscribe_does_not_evict_the_route() {
+        let mut actor = actor_with_one_fabric();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let (sink, _reports, _ctrl) = test_report_sink();
+        actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, sid, 0x77, 0x42, far_future()),
+        );
+        actor.resubscribe_stranded(sid);
+        assert!(actor.resubscribes.iter().any(|pr| pr.sub_id == SubId(1)));
+        assert!(actor.cache.contains_key(&(fabric_id, 0x42)), "route kept");
+    }
+
+    /// Spec test 6 (D4): a route already replaced by a newer session is kept
+    /// (chip spares sessions with newer peer activity); the timed-out
+    /// subscription's old session, referenced by nothing, is removed.
+    #[test]
+    fn a_liveness_timeout_keeps_a_route_already_replaced_by_a_newer_session() {
+        let mut actor = actor_with_one_fabric();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let old_session = register_test_session(&mut actor);
+        let new_session = route_to_test_session(&mut actor, 0x42);
+        let (sink, _reports, _ctrl) = test_report_sink();
+        actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, old_session, 0x77, 0x42, Instant::now()),
+        );
+        actor.check_liveness();
+        assert_eq!(
+            actor.cache.get(&(fabric_id, 0x42)).map(|c| c.session_id),
+            Some(new_session)
+        );
+        assert!(actor.sessions.get(new_session).is_some());
+        assert!(actor.sessions.get(old_session).is_none(), "orphan removed");
+    }
+
+    /// Spec test 7: two stale siblings on one session timing out in the same
+    /// pass — the session goes once the last `SubEntry` leaves it, which is
+    /// why the orphan test runs after `begin_resubscribe`, per subscription.
+    #[test]
+    fn two_stale_siblings_on_one_session_remove_it_only_after_the_last() {
+        let mut actor = actor_with_one_fabric();
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let (sink_a, _reports_a, _ctrl_a) = test_report_sink();
+        let (sink_b, _reports_b, _ctrl_b) = test_report_sink();
+        actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink_a, sid, 0x71, 0x42, Instant::now()),
+        );
+        actor.insert_subscription(
+            SubId(2),
+            test_sub_entry(sink_b, sid, 0x72, 0x42, Instant::now()),
+        );
+        actor.check_liveness();
+        assert_eq!(actor.resubscribes.len(), 2);
+        assert!(actor.sessions.get(sid).is_none());
+    }
+
+    /// Spec §4.6: no sibling guard on the route (chip parity), but the session
+    /// a live sibling still uses stays — and so does the sibling.
+    #[test]
+    fn a_liveness_timeout_keeps_the_session_a_live_sibling_uses() {
+        let mut actor = actor_with_one_fabric();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let (stale, _reports_a, _ctrl_a) = test_report_sink();
+        let (live, _reports_b, _ctrl_b) = test_report_sink();
+        actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(stale, sid, 0x71, 0x42, Instant::now()),
+        );
+        actor.insert_subscription(
+            SubId(2),
+            test_sub_entry(live, sid, 0x72, 0x42, far_future()),
+        );
+        actor.check_liveness();
+        assert!(
+            !actor.cache.contains_key(&(fabric_id, 0x42)),
+            "route evicted"
+        );
+        assert!(
+            actor.sessions.get(sid).is_some(),
+            "the sibling's session stays"
+        );
+        assert_eq!(actor.subscriptions[&SubId(2)].session_id, sid);
+    }
+
+    /// Spec test 7: a timed-out resubscribe drops the route, not a session a
+    /// sibling still uses (0.16 removed the session, stranding the sibling and
+    /// any in-flight invoke on it).
+    #[tokio::test]
+    async fn a_timed_out_resubscribe_evicts_only_the_route_and_spares_a_siblings_session() {
+        let mut actor = actor_with_one_fabric();
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let (live, _live_reports, _live_ctrl) = test_report_sink();
+        actor.insert_subscription(
+            SubId(2),
+            test_sub_entry(live, sid, 0x72, 0x42, far_future()),
+        );
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 1, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (sid, 0x30), pr, far_future());
+        tokio::time::timeout(
+            SENT_WITHIN,
+            actor.on_pending_timeout(sid, 0x30, SubscribeFailure::MrpExpired),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !actor.cache.contains_key(&(fabric_id, 0x42)),
+            "route evicted"
+        );
+        assert!(
+            actor.sessions.get(sid).is_some(),
+            "the sibling's session stays"
+        );
+        assert!(actor.subscriptions.contains_key(&SubId(2)));
+        assert_eq!(queued_state(&actor, 1).0, 2, "rescheduled");
+    }
+
+    /// Spec §4.6 (review S7): after a resubscribe timeout, a session nothing
+    /// references any more is removed, so it cannot crowd out live ones at
+    /// the session table's cap.
+    #[tokio::test]
+    async fn an_unreferenced_session_is_removed_after_a_resubscribe_timeout() {
+        let mut actor = actor_with_one_fabric();
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 1, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (sid, 0x31), pr, far_future());
+        tokio::time::timeout(
+            SENT_WITHIN,
+            actor.on_pending_timeout(sid, 0x31, SubscribeFailure::MrpExpired),
+        )
+        .await
+        .unwrap();
+        assert!(actor.sessions.get(sid).is_none());
+    }
+
+    /// Review focus 3: a session with an operation still in flight on it is
+    /// never removed as an orphan, even when the cache has moved on.
+    #[tokio::test]
+    async fn a_session_with_an_op_in_flight_is_never_removed_as_an_orphan() {
+        let mut actor = actor_with_one_fabric();
+        let old_session = register_test_session(&mut actor);
+        route_to_test_session(&mut actor, 0x42);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 1, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (old_session, 0x32), pr, far_future());
+        seed_pending_round_trip(&mut actor, old_session, 0x33, 0x42);
+        tokio::time::timeout(
+            SENT_WITHIN,
+            actor.on_pending_timeout(old_session, 0x32, SubscribeFailure::MrpExpired),
+        )
+        .await
+        .unwrap();
+        assert!(
+            actor.sessions.get(old_session).is_some(),
+            "the in-flight round trip still needs it"
+        );
+    }
+
+    /// Spec §4.6 ("after every route-only eviction"): a round trip whose MRP
+    /// retransmissions run out removes its session along with the route once
+    /// nothing else uses it — and its reconnect-and-re-send-once (review B1)
+    /// is untouched.
+    #[tokio::test]
+    async fn a_round_trip_timeout_removes_its_session_once_nothing_uses_it() {
+        let mut actor = actor_with_one_fabric();
+        let sid = route_to_test_session(&mut actor, 0x42);
+        seed_pending_round_trip(&mut actor, sid, 0x34, 0x42);
+        tokio::time::timeout(
+            SENT_WITHIN,
+            actor.on_pending_timeout(sid, 0x34, SubscribeFailure::MrpExpired),
+        )
+        .await
+        .unwrap();
+        assert!(actor.sessions.get(sid).is_none(), "orphan removed");
+        assert!(
+            matches!(
+                actor.pending_connects.get(&0x42).map(Vec::as_slice),
+                Some([ConnectWaiter::ResendPending(_)])
+            ),
+            "the re-send still waits on a fresh connect"
+        );
+    }
+
+    /// … but a round-trip timeout keeps a session a subscription still rides.
+    #[tokio::test]
+    async fn a_round_trip_timeout_keeps_a_session_a_subscription_still_uses() {
+        let mut actor = actor_with_one_fabric();
+        let sid = route_to_test_session(&mut actor, 0x42);
+        let (live, _live_reports, _live_ctrl) = test_report_sink();
+        actor.insert_subscription(
+            SubId(2),
+            test_sub_entry(live, sid, 0x72, 0x42, far_future()),
+        );
+        seed_pending_round_trip(&mut actor, sid, 0x35, 0x42);
+        tokio::time::timeout(
+            SENT_WITHIN,
+            actor.on_pending_timeout(sid, 0x35, SubscribeFailure::MrpExpired),
+        )
+        .await
+        .unwrap();
+        assert!(
+            actor.sessions.get(sid).is_some(),
+            "the subscription's session stays"
+        );
+        assert_eq!(actor.pending_connects[&0x42].len(), 1, "re-send queued");
+    }
+
+    /// Spec §4.6: re-keying a subscription to the session its report arrived
+    /// on can leave its old session referenced by nothing; it is removed.
+    #[tokio::test]
+    async fn a_rekey_removes_the_orphaned_old_session() {
+        let mut w = wired_actor();
+        let arriving = w.sid;
+        w.actor.sessions.get_mut(arriving).unwrap().peer.node_id =
+            Some(matter_transport::NodeId(0x42));
+        let established_on = register_test_session(&mut w.actor);
+        let (sink, _reports, _ctrl) = test_report_sink();
+        w.actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, established_on, 0x1234_5678, 0x42, far_future()),
+        );
+        let report = build_report_data(1, 0x06, 0x0000, &matter_codec::Value::Bool(true));
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::INTERACTION_MODEL, OP_REPORT_DATA, &report),
+        )
+        .await
+        .unwrap();
+        assert_eq!(w.next_status(SENT_WITHIN).await, Some((exchange, 0x00)));
+        assert!(
+            w.actor.sessions.get(established_on).is_none(),
+            "old session removed"
+        );
+        assert!(w.actor.sessions.get(arriving).is_some());
     }
 }
