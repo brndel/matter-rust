@@ -44,6 +44,10 @@ const NEEDS_TIMED_INTERACTION: u8 = 0xc6;
 /// subscribe exchange that ends the attempt (chip's `ReadClient` error exit),
 /// and a steady-state report that cannot be read.
 const IM_STATUS_INVALID_ACTION: u8 = 0x80;
+/// IM status `INVALID_SUBSCRIPTION` (Matter 1.4 §8.10). Answers a report for a
+/// subscription this controller does not hold (or no longer wants), so the
+/// device drops it at once (Matter 1.4 §8.5).
+const IM_STATUS_INVALID_SUBSCRIPTION: u8 = 0x7d;
 
 /// `true` if a plain (non-timed) write/invoke response signals the device
 /// requires a *timed* interaction (`NEEDS_TIMED_INTERACTION`, 0xc6).
@@ -628,6 +632,15 @@ struct SubEntry {
     max_interval_ceiling: u16,
     /// Re-subscribe if no report arrives by this instant.
     liveness_deadline: Instant,
+}
+
+/// A steady-state report that cannot be delivered (spec §4.5): the
+/// subscription id it carried, if any, why (for the log), and the IM status it
+/// is answered with.
+struct StrayReport {
+    subscription_id: Option<u32>,
+    reason: &'static str,
+    status: u8,
 }
 
 /// A scheduled resubscribe attempt, fired by the timer arm when due.
@@ -2815,11 +2828,12 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             }
             Command::CancelSubscription { key } => {
                 self.remove_subscription(key);
-                // Also drop any scheduled resubscribe for this handle. An
-                // in-flight resubscribe attempt (a pending Subscribe) will
-                // re-insert a SubEntry on its response — a benign tiny window
-                // closed by the consumer's next cancel/Drop.
+                // Also drop the subscription's resubscribe wherever it sits:
+                // queued, on the wire (purged, its exchange closed), or waiting
+                // on a connect (its waiter dropped). Nothing of it survives to
+                // send a request or re-insert a SubEntry later.
                 self.resubscribes.retain(|pr| pr.sub_id != key);
+                self.purge_inflight_resubscribe(key);
                 self.resubscribe_pulled_at.remove(&key);
             }
             Command::ResubscribeNow { node_id, reply } => {
@@ -4112,6 +4126,43 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         established || in_episode || initial_pending || initial_parked
     }
 
+    /// Drop every in-flight trace of `sub_id`'s resubscribe (spec §4.5):
+    ///
+    /// - an attempt on the wire (a `Subscribe` pending with no reply) is
+    ///   removed and its MRP exchange — the purged pending's own key — closed,
+    ///   which drops its pending retransmits and buffered ack: the
+    ///   `SubscribeRequest` stops retransmitting and cannot be late-delivered
+    ///   to create a subscription nobody reads (or, with
+    ///   `KeepSubscriptions = false`, to terminate a sibling);
+    /// - an attempt waiting on a connect loses its waiter. The connect itself
+    ///   keeps running for whatever else waits on it; an emptied waiter list is
+    ///   tolerated by `handle_connect_done` and `fail_connect_waiters`.
+    ///
+    /// Matter has no unsubscribe message; this is what chip's `ReadClient`
+    /// destructor does (it releases its exchange, aborting MRP retries).
+    fn purge_inflight_resubscribe(&mut self, sub_id: SubId) {
+        let keys: Vec<(SessionId, u16)> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| {
+                matches!(
+                    &p.reply,
+                    PendingReply::Subscribe { sub_id: s, reply: None, .. } if *s == sub_id
+                )
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for (sid, exchange) in keys {
+            self.pending.remove(&(sid, exchange));
+            if let Some(session) = self.sessions.get_mut(sid) {
+                session.mrp.close_exchange(exchange);
+            }
+        }
+        for waiters in self.pending_connects.values_mut() {
+            waiters.retain(|w| !matches!(w, ConnectWaiter::Resubscribe(pr) if pr.sub_id == sub_id));
+        }
+    }
+
     /// Whether the resubscribe watch must hold the fabric-subtype browse open:
     /// true while some subscription whose consumer is still listening is in a
     /// resubscribe episode ([`Self::resubscribe_episode_entries`]). An entry
@@ -4968,6 +5019,13 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         sid: SessionId,
         peer: SocketAddr,
     ) {
+        // A consumer that dropped both receivers can never observe this
+        // subscription again, so send nothing (spec §4.5 backstop: the `Drop`
+        // cancel is a lossy `try_send` and may not have arrived).
+        if pr.tx.consumer_gone() {
+            self.resubscribe_pulled_at.remove(&pr.sub_id);
+            return;
+        }
         let req =
             matter_interaction::build_subscribe_request(&matter_interaction::SubscribeRequest {
                 keep_subscriptions: self.keep_subscriptions_for(pr.node_id, Some(pr.sub_id)),
@@ -5913,8 +5971,9 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 if self.pending.contains_key(&(session_id, exchange_id)) {
                     self.resolve_pending(session_id, exchange_id, protocol_id, opcode, payload)
                         .await;
-                } else if opcode == OP_REPORT_DATA {
-                    self.deliver_report(session_id, exchange_id, &payload).await;
+                } else if opcode == OP_REPORT_DATA && protocol_id == ProtocolId::INTERACTION_MODEL {
+                    self.deliver_report(session_id, exchange_id, from, &payload)
+                        .await;
                 }
                 // else: foreign app message — nothing to do (MRP already acked).
             }
@@ -6252,22 +6311,46 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         Ok(())
     }
 
-    /// Deliver a steady-state `ReportData` to its subscription, matched by the
-    /// current `(session, wire_sub_id)`, reassembling chunks and resetting the
-    /// liveness deadline, then ack on the report's own exchange.
-    async fn deliver_report(&mut self, session_id: SessionId, exchange_id: u16, payload: &[u8]) {
-        let Ok(mut rd) = matter_interaction::parse_report_data(payload) else {
-            return;
-        };
-        let Some(wire_sub_id) = rd.subscription_id else {
-            return; // steady-state reports must carry a subscriptionId
+    /// Deliver a steady-state `ReportData` to its subscription
+    /// ([`Self::match_report`]), reassembling chunks and resetting the liveness
+    /// deadline, then ack on the report's own exchange.
+    ///
+    /// A report that cannot be delivered is answered on its exchange rather
+    /// than dropped, as chip's `InteractionModelEngine::OnUnsolicitedReportData`
+    /// answers it (spec §4.5):
+    ///
+    /// - no subscription of ours matches it, or the one that does has a
+    ///   consumer that is gone (it is reaped — up front, or here when a send
+    ///   finds the report receiver closed): `StatusResponse(InvalidSubscription)`,
+    ///   so the device drops that subscription at once (Matter 1.4 §8.5)
+    ///   instead of pushing reports nobody reads;
+    /// - it does not parse, or carries no `SubscriptionId`:
+    ///   `StatusResponse(InvalidAction)`.
+    ///
+    /// No amplification: only a message that decrypts on a known session gets
+    /// here, the reply is one-for-one, and MRP bounds it. Consequence, as in
+    /// chip: a report that overtakes a lost `SubscribeResponse`'s
+    /// retransmission matches nothing yet, draws `InvalidSubscription`, and so
+    /// tears that fresh subscription down; it comes back through liveness and
+    /// resubscribe.
+    async fn deliver_report(
+        &mut self,
+        session_id: SessionId,
+        exchange_id: u16,
+        from: SocketAddr,
+        payload: &[u8],
+    ) {
+        let (mut rd, wire_sub_id, sub_id) = match self.match_report(session_id, from, payload) {
+            Ok(matched) => matched,
+            Err(stray) => {
+                self.answer_stray_report(session_id, exchange_id, from, stray)
+                    .await;
+                return;
+            }
         };
         let now = Instant::now();
-        let Some(&sub_id) = self.sub_index.get(&(session_id, wire_sub_id)) else {
-            return;
-        };
         let Some(entry) = self.subscriptions.get_mut(&sub_id) else {
-            debug_assert!(false, "sub_index points at a missing subscription");
+            debug_assert!(false, "match_report returned a missing subscription");
             return;
         };
         entry.liveness_deadline =
@@ -6286,7 +6369,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 break;
             }
         }
-        // `rd` was parsed once above (to read its `subscription_id`); hand the
+        // `rd` was parsed once (to read its `subscription_id`); hand the
         // parsed struct straight to the reassembler rather than re-parsing the
         // same bytes inside `push`.
         if !consumer_gone {
@@ -6303,10 +6386,150 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             }
         }
         if consumer_gone {
+            // Reaped: we no longer hold it, so tell the device (spec §4.5).
             self.remove_subscription(sub_id);
+            self.answer_stray_report(
+                session_id,
+                exchange_id,
+                from,
+                StrayReport {
+                    subscription_id: Some(wire_sub_id),
+                    reason: "consumer gone",
+                    status: IM_STATUS_INVALID_SUBSCRIPTION,
+                },
+            )
+            .await;
             return;
         }
         let _ = self.send_status_ack(session_id, exchange_id, peer).await;
+    }
+
+    /// Parse a steady-state report and find the subscription it belongs to
+    /// ([`Self::find_report_subscription`]): `(the parsed report, its
+    /// subscription id, our subscription)`, or why it cannot be delivered. A
+    /// matched subscription whose consumer is gone is reaped here and reported
+    /// as stray (spec §4.5 step 3: only after the lookup).
+    fn match_report(
+        &mut self,
+        session_id: SessionId,
+        from: SocketAddr,
+        payload: &[u8],
+    ) -> Result<(matter_interaction::ReportData, u32, SubId), StrayReport> {
+        let Ok(rd) = matter_interaction::parse_report_data(payload) else {
+            return Err(StrayReport {
+                subscription_id: None,
+                reason: "malformed",
+                status: IM_STATUS_INVALID_ACTION,
+            });
+        };
+        let Some(wire_sub_id) = rd.subscription_id else {
+            return Err(StrayReport {
+                subscription_id: None,
+                reason: "no subscription id",
+                status: IM_STATUS_INVALID_ACTION,
+            });
+        };
+        let invalid_subscription = move |reason: &'static str| StrayReport {
+            subscription_id: Some(wire_sub_id),
+            reason,
+            status: IM_STATUS_INVALID_SUBSCRIPTION,
+        };
+        let Some(sub_id) = self.find_report_subscription(session_id, wire_sub_id, from) else {
+            return Err(invalid_subscription("unknown subscription"));
+        };
+        if self
+            .subscriptions
+            .get(&sub_id)
+            .is_some_and(|entry| entry.tx.consumer_gone())
+        {
+            self.remove_subscription(sub_id);
+            return Err(invalid_subscription("consumer gone"));
+        }
+        Ok((rd, wire_sub_id, sub_id))
+    }
+
+    /// The subscription a steady-state report belongs to (spec §4.5), re-keyed
+    /// to `session_id` when it was established on another session.
+    ///
+    /// 1. An exact `(session, subscription id)` hit in `sub_index`.
+    /// 2. Otherwise the session's peer node (a CASE session carries it in its
+    ///    [`matter_transport::PeerHint`]) and the subscription id, as chip
+    ///    finds a report's subscription by (fabric, node, subscription id): a
+    ///    publisher may report on any session it holds with us, and since a
+    ///    liveness timeout opens a new session while siblings stay on the old
+    ///    one, the two can differ. Exactly one match is delivered and moved to
+    ///    this session through [`Self::insert_subscription`], so the
+    ///    keep-first-owner rule holds (chip moves its session holder the same
+    ///    way). None or several matches — several only from a device reusing a
+    ///    subscription id, which is not compliant — count as unknown, as does
+    ///    a session with no peer node id (PASE).
+    ///
+    /// A re-keyed subscription also takes the arriving session's peer address
+    /// (else `from`, where the report came from): a cross-session hit is
+    /// exactly when the device may have moved — a fresh CASE session after a
+    /// reboot or a DHCP renewal — and acks sent to the stale address would make
+    /// the device tear the subscription down.
+    fn find_report_subscription(
+        &mut self,
+        session_id: SessionId,
+        wire_sub_id: u32,
+        from: SocketAddr,
+    ) -> Option<SubId> {
+        if let Some(&sub_id) = self.sub_index.get(&(session_id, wire_sub_id)) {
+            return Some(sub_id);
+        }
+        let node_id = self.sessions.get(session_id)?.peer.node_id?.0;
+        let mut matching = self
+            .subscriptions
+            .iter()
+            .filter(|(_, e)| e.node_id == node_id && e.wire_sub_id == wire_sub_id)
+            .map(|(id, _)| *id);
+        let sub_id = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        let mut entry = self.remove_subscription(sub_id)?;
+        entry.session_id = session_id;
+        entry.peer = self
+            .sessions
+            .get(session_id)
+            .and_then(|s| s.peer_addr)
+            .unwrap_or(from);
+        self.insert_subscription(sub_id, entry);
+        Some(sub_id)
+    }
+
+    /// Answer a steady-state report that cannot be delivered with
+    /// `StatusResponse(stray.status)` on its own exchange, and log why
+    /// (spec §4.7).
+    async fn answer_stray_report(
+        &mut self,
+        session_id: SessionId,
+        exchange_id: u16,
+        peer: SocketAddr,
+        stray: StrayReport,
+    ) {
+        let node = self
+            .sessions
+            .get(session_id)
+            .and_then(|s| s.peer.node_id)
+            .map_or_else(|| "unknown".to_string(), |n| format!("{:016X}", n.0));
+        let StrayReport {
+            subscription_id,
+            reason,
+            status,
+        } = stray;
+        tracing::debug!(
+            target: "matter_controller::actor",
+            node = %node,
+            subscription_id = ?subscription_id,
+            reason,
+            status = format_args!("0x{status:02x}"),
+            "answering a report that cannot be delivered",
+        );
+        let _ = self
+            .send_status(session_id, exchange_id, peer, status)
+            .await;
     }
 
     /// Send a `SubscribeRequest` and register a pending subscribe handshake. The
@@ -22221,5 +22444,463 @@ mod tests {
             });
         assert_eq!(resent.request.payload, expected);
         assert!(resent.retried, "re-sent once only");
+    }
+
+    /// Spec test 5 (D3): cancelling a subscription whose resubscribe is on the
+    /// wire purges the pending attempt AND closes its MRP exchange, so the
+    /// `SubscribeRequest` stops retransmitting and cannot be late-delivered.
+    #[tokio::test]
+    async fn cancel_purges_an_in_flight_resubscribe_and_stops_its_retransmits() {
+        let mut actor = actor_with_one_fabric();
+        let sid = register_test_session(&mut actor);
+        let peer: SocketAddr = "127.0.0.1:5540".parse().unwrap();
+        // A real reliable send, so MRP holds a retransmit for the exchange.
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            actor.send_request(
+                sid,
+                peer,
+                OP_SUBSCRIBE_REQUEST,
+                ProtocolId::INTERACTION_MODEL,
+                &[],
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 0, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (sid, exchange), pr, far_future());
+
+        tokio::time::timeout(
+            SENT_WITHIN,
+            actor.dispatch_ready(Command::CancelSubscription { key: SubId(1) }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!actor.pending.contains_key(&(sid, exchange)), "purged");
+        let later = Instant::now() + Duration::from_secs(60);
+        let events = actor.sessions.handle_timeout(later);
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                MrpEvent::Retransmit { exchange_id, .. } | MrpEvent::Expired { exchange_id, .. }
+                    if *exchange_id == exchange
+            )),
+            "a cancelled SubscribeRequest must not be retransmitted"
+        );
+    }
+
+    /// Review focus 2: the purge closes the purged attempt's own exchange
+    /// only; an unrelated request in flight on the same session keeps its MRP
+    /// retransmits.
+    #[tokio::test]
+    async fn cancel_closes_only_the_purged_exchange() {
+        let mut actor = actor_with_one_fabric();
+        let sid = register_test_session(&mut actor);
+        let peer: SocketAddr = "127.0.0.1:5540".parse().unwrap();
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            actor.send_request(
+                sid,
+                peer,
+                OP_SUBSCRIBE_REQUEST,
+                ProtocolId::INTERACTION_MODEL,
+                &[],
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 0, Instant::now());
+        seed_inflight_resubscribe(&mut actor, (sid, exchange), pr, far_future());
+        let other = tokio::time::timeout(
+            SENT_WITHIN,
+            actor.send_request(sid, peer, 0x02, ProtocolId::INTERACTION_MODEL, b"ping"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        tokio::time::timeout(
+            SENT_WITHIN,
+            actor.dispatch_ready(Command::CancelSubscription { key: SubId(1) }),
+        )
+        .await
+        .unwrap();
+
+        assert!(actor.sessions.get(sid).is_some(), "the session stays");
+        let later = Instant::now() + Duration::from_secs(60);
+        let events = actor.sessions.handle_timeout(later);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                MrpEvent::Retransmit { exchange_id, .. } | MrpEvent::Expired { exchange_id, .. }
+                    if *exchange_id == other
+            )),
+            "the other request must keep retransmitting"
+        );
+    }
+
+    /// Spec test 5 (D3): cancelling a subscription whose resubscribe waits on a
+    /// connect drops its waiter and leaves the connect running for the rest.
+    #[tokio::test]
+    async fn cancel_drops_a_connecting_resubscribe_but_leaves_the_connect_running() {
+        let mut actor = actor_with_one_fabric();
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, 0x42, 0, Instant::now());
+        let (sibling, _s_reports, _s_ctrl) = test_pending_resubscribe(2, 0x42, 0, Instant::now());
+        actor.pending_connects.insert(
+            0x42,
+            vec![
+                ConnectWaiter::Resubscribe(pr),
+                ConnectWaiter::Resubscribe(sibling),
+            ],
+        );
+        let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+        actor.connect_inbound.insert(0x42, inbound_tx);
+
+        tokio::time::timeout(
+            SENT_WITHIN,
+            actor.dispatch_ready(Command::CancelSubscription { key: SubId(1) }),
+        )
+        .await
+        .unwrap();
+
+        let waiters = &actor.pending_connects[&0x42];
+        assert_eq!(waiters.len(), 1);
+        assert!(matches!(&waiters[0], ConnectWaiter::Resubscribe(pr) if pr.sub_id == SubId(2)));
+        assert!(
+            actor.connect_inbound.contains_key(&0x42),
+            "the connect keeps running"
+        );
+    }
+
+    /// Spec test 5 (D3 backstop): a connect completing for a resubscribe whose
+    /// consumer is gone sends nothing.
+    #[tokio::test]
+    async fn a_connect_completing_for_a_cancelled_resubscribe_sends_nothing() {
+        let mut actor = actor_with_one_fabric();
+        let sid = register_test_session(&mut actor);
+        let (pr, reports, ctrl) = test_pending_resubscribe(1, 0x42, 0, Instant::now());
+        drop(reports);
+        drop(ctrl);
+        actor.resubscribe_pulled_at.insert(SubId(1), Instant::now());
+        tokio::time::timeout(
+            SENT_WITHIN,
+            actor.resume_resubscribe(pr, sid, "127.0.0.1:5540".parse().unwrap()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            actor.pending.is_empty(),
+            "no SubscribeRequest for a consumer that is gone"
+        );
+        assert!(actor.resubscribes.is_empty());
+        assert!(actor.resubscribe_pulled_at.is_empty());
+    }
+
+    /// Spec test 5 (D3): a report for a subscription we do not hold is answered
+    /// `InvalidSubscription`, so the device drops it at once (Matter 1.4
+    /// §8.5). A session with no peer node id (here PASE) has no cross-session
+    /// lookup: an entry with the same id on another session is not matched.
+    #[tokio::test]
+    async fn a_report_for_an_unknown_subscription_is_answered_invalid_subscription() {
+        let mut w = wired_actor();
+        let elsewhere = register_test_session(&mut w.actor);
+        let (sink, _reports, _ctrl) = test_report_sink();
+        w.actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, elsewhere, 0x1234_5678, 0x42, far_future()),
+        );
+        let report = build_report_data(1, 0x06, 0x0000, &matter_codec::Value::Bool(true));
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::INTERACTION_MODEL, OP_REPORT_DATA, &report),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((exchange, IM_STATUS_INVALID_SUBSCRIPTION))
+        );
+        assert_eq!(
+            w.actor.subscriptions[&SubId(1)].session_id,
+            elsewhere,
+            "not re-keyed"
+        );
+    }
+
+    /// Spec §4.5: a report for a subscription whose consumer is gone is
+    /// answered `InvalidSubscription`, and the subscription is reaped — checked
+    /// up front, so even a report that hands the consumer nothing yet (a
+    /// non-final chunk, which never reaches a send) is answered.
+    #[tokio::test]
+    async fn a_report_whose_consumer_is_gone_is_answered_invalid_subscription_and_reaped() {
+        let mut w = wired_actor();
+        let (sink, reports, ctrl) = test_report_sink();
+        drop(reports);
+        drop(ctrl);
+        let sid = w.sid;
+        w.actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, sid, 0x1234_5678, 0x42, far_future()),
+        );
+        let chunk =
+            build_report_data_chunk(1, 0x06, 0x0000, &matter_codec::Value::Bool(true), true);
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::INTERACTION_MODEL, OP_REPORT_DATA, &chunk),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((exchange, IM_STATUS_INVALID_SUBSCRIPTION))
+        );
+        assert!(w.actor.subscriptions.is_empty() && w.actor.sub_index.is_empty());
+    }
+
+    /// Spec §4.5: the late reap — a send that finds the report receiver
+    /// closed while the control receiver is still open (so the up-front check
+    /// did not fire) — also answers `InvalidSubscription`.
+    #[tokio::test]
+    async fn a_report_whose_report_receiver_is_gone_is_answered_invalid_subscription() {
+        let mut w = wired_actor();
+        let (sink, reports, _ctrl) = test_report_sink();
+        drop(reports);
+        let sid = w.sid;
+        w.actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, sid, 0x1234_5678, 0x42, far_future()),
+        );
+        let report = build_report_data(1, 0x06, 0x0000, &matter_codec::Value::Bool(true));
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::INTERACTION_MODEL, OP_REPORT_DATA, &report),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((exchange, IM_STATUS_INVALID_SUBSCRIPTION))
+        );
+        assert!(w.actor.subscriptions.is_empty(), "reaped");
+    }
+
+    /// Spec test 5 (D3): a steady-state report that does not parse is
+    /// answered `InvalidAction` (it used to be dropped silently).
+    #[tokio::test]
+    async fn a_malformed_steady_state_report_is_answered_invalid_action() {
+        let mut w = wired_actor();
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::INTERACTION_MODEL, OP_REPORT_DATA, &[]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((exchange, IM_STATUS_INVALID_ACTION))
+        );
+    }
+
+    /// A `ReportDataMessage` with no `SubscriptionId`: just the IM revision.
+    fn build_report_data_without_subscription_id() -> Vec<u8> {
+        use matter_codec::{Tag, TlvWriter};
+        let mut buf = Vec::new();
+        let mut w = TlvWriter::new(&mut buf);
+        w.start_structure(Tag::Anonymous).unwrap();
+        w.put_uint(Tag::Context(0xFF), 11).unwrap();
+        w.end_container().unwrap();
+        buf
+    }
+
+    /// Spec §4.5: a steady-state report with no `SubscriptionId` is answered
+    /// `InvalidAction`.
+    #[tokio::test]
+    async fn a_report_without_a_subscription_id_is_answered_invalid_action() {
+        let mut w = wired_actor();
+        let report = build_report_data_without_subscription_id();
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::INTERACTION_MODEL, OP_REPORT_DATA, &report),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((exchange, IM_STATUS_INVALID_ACTION))
+        );
+    }
+
+    /// Spec tests 5 and 7: a publisher may report on any session it holds with
+    /// us. A report for a live subscription that arrives on a session other
+    /// than its own is matched by (peer node, subscription id), delivered,
+    /// acked Success, and the subscription is re-keyed to that session —
+    /// taking that session's peer address, since the device may have moved.
+    /// (`InMemoryDatagram::send_to` ignores the address, so the stored peer is
+    /// what is asserted.)
+    #[tokio::test]
+    async fn a_report_on_another_session_is_delivered_and_rekeyed() {
+        let mut w = wired_actor();
+        let arriving = w.sid;
+        let moved_to: SocketAddr = "10.0.0.9:5540".parse().unwrap();
+        {
+            let session = w.actor.sessions.get_mut(arriving).unwrap();
+            session.peer.node_id = Some(matter_transport::NodeId(0x42));
+            session.peer_addr = Some(moved_to);
+        }
+        let established_on = register_test_session(&mut w.actor);
+        let (sink, mut reports, _ctrl) = test_report_sink();
+        w.actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, established_on, 0x1234_5678, 0x42, far_future()),
+        );
+        let report = build_report_data(1, 0x06, 0x0000, &matter_codec::Value::Bool(true));
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::INTERACTION_MODEL, OP_REPORT_DATA, &report),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((exchange, 0x00)),
+            "acked"
+        );
+        assert!(
+            matches!(reports.try_recv(), Ok(SubscriptionEvent::Report(_))),
+            "delivered"
+        );
+        assert_eq!(
+            w.actor.subscriptions[&SubId(1)].session_id,
+            arriving,
+            "re-keyed"
+        );
+        assert_eq!(
+            w.actor.subscriptions[&SubId(1)].peer,
+            moved_to,
+            "acks now go to the session's address"
+        );
+        assert_eq!(
+            w.actor.sub_index.get(&(arriving, 0x1234_5678)),
+            Some(&SubId(1))
+        );
+        assert!(!w
+            .actor
+            .sub_index
+            .contains_key(&(established_on, 0x1234_5678)));
+    }
+
+    /// Spec §4.5: a re-keyed subscription whose arriving session has no
+    /// stamped address takes the address the report came from.
+    #[tokio::test]
+    async fn a_report_on_another_session_without_an_address_rekeys_to_its_source() {
+        let mut w = wired_actor();
+        let arriving = w.sid;
+        w.actor.sessions.get_mut(arriving).unwrap().peer.node_id =
+            Some(matter_transport::NodeId(0x42));
+        let established_on = register_test_session(&mut w.actor);
+        let (sink, _reports, _ctrl) = test_report_sink();
+        w.actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink, established_on, 0x1234_5678, 0x42, far_future()),
+        );
+        let report = build_report_data(1, 0x06, 0x0000, &matter_codec::Value::Bool(true));
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::INTERACTION_MODEL, OP_REPORT_DATA, &report),
+        )
+        .await
+        .unwrap();
+        assert_eq!(w.next_status(SENT_WITHIN).await, Some((exchange, 0x00)));
+        assert_eq!(w.actor.subscriptions[&SubId(1)].peer, w.dev.local_addr());
+    }
+
+    /// Review focus 5: a subscription id that matches two of the node's
+    /// subscriptions elsewhere (a non-compliant device reusing ids) is
+    /// treated as unknown: answered `InvalidSubscription`, nothing delivered,
+    /// nothing re-keyed.
+    #[tokio::test]
+    async fn a_report_matching_two_subscriptions_elsewhere_is_unknown() {
+        let mut w = wired_actor();
+        let arriving = w.sid;
+        w.actor.sessions.get_mut(arriving).unwrap().peer.node_id =
+            Some(matter_transport::NodeId(0x42));
+        let first_session = register_test_session(&mut w.actor);
+        let second_session = register_test_session(&mut w.actor);
+        let (sink_a, mut reports_a, _ctrl_a) = test_report_sink();
+        let (sink_b, mut reports_b, _ctrl_b) = test_report_sink();
+        w.actor.insert_subscription(
+            SubId(1),
+            test_sub_entry(sink_a, first_session, 0x1234_5678, 0x42, far_future()),
+        );
+        w.actor.insert_subscription(
+            SubId(2),
+            test_sub_entry(sink_b, second_session, 0x1234_5678, 0x42, far_future()),
+        );
+        let report = build_report_data(1, 0x06, 0x0000, &matter_codec::Value::Bool(true));
+        let exchange = tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::INTERACTION_MODEL, OP_REPORT_DATA, &report),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((exchange, IM_STATUS_INVALID_SUBSCRIPTION))
+        );
+        assert!(reports_a.try_recv().is_err() && reports_b.try_recv().is_err());
+        assert_eq!(w.actor.subscriptions[&SubId(1)].session_id, first_session);
+        assert_eq!(w.actor.subscriptions[&SubId(2)].session_id, second_session);
+    }
+
+    /// Review focus 1: after a cancel purged an in-flight attempt, a priming
+    /// report the device sends on that exchange is no longer the handshake's;
+    /// it is answered `InvalidSubscription` (so the device drops the
+    /// subscription it just created) and reaches no consumer.
+    #[tokio::test]
+    async fn a_late_priming_report_after_cancel_is_answered_invalid_subscription() {
+        let mut w = wired_actor();
+        let (pr, mut reports, _ctrl) = test_pending_resubscribe(1, 0x42, 0, Instant::now());
+        seed_inflight_resubscribe(&mut w.actor, (w.sid, 0x70), pr, far_future());
+        tokio::time::timeout(
+            SENT_WITHIN,
+            w.actor
+                .dispatch_ready(Command::CancelSubscription { key: SubId(1) }),
+        )
+        .await
+        .unwrap();
+        let report = build_report_data(1, 0x06, 0x0000, &matter_codec::Value::Bool(true));
+        tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(
+                Some(0x70),
+                ProtocolId::INTERACTION_MODEL,
+                OP_REPORT_DATA,
+                &report,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            w.next_status(SENT_WITHIN).await,
+            Some((0x70, IM_STATUS_INVALID_SUBSCRIPTION))
+        );
+        assert!(reports.try_recv().is_err(), "no consumer sees it");
+    }
+
+    /// Spec §4.2 / §5: only Interaction Model reports are acted on; a non-IM
+    /// message with opcode 0x05 is not answered.
+    #[tokio::test]
+    async fn a_non_im_report_opcode_is_not_answered() {
+        let mut w = wired_actor();
+        tokio::time::timeout(
+            SENT_WITHIN,
+            w.deliver(None, ProtocolId::BDX, OP_REPORT_DATA, &[]),
+        )
+        .await
+        .unwrap();
+        assert!(w.next_sent(NOTHING_SENT_WITHIN).await.is_none());
     }
 }
