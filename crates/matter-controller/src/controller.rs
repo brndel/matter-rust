@@ -956,6 +956,7 @@ impl MatterController {
     /// [`Error::NotCommissioned`] if no sole fabric exists, or a
     /// [`Error::Snapshot`]/[`Error::Codec`]/[`Error::Cert`] deserialization
     /// failure for a corrupt stored record.
+    #[cfg(any(feature = "ota", test))]
     pub(crate) async fn resumption_record_for(
         &self,
         node_id: u64,
@@ -1021,6 +1022,7 @@ impl MatterController {
     /// [`Error::ControllerStopped`] if the owning task stopped,
     /// [`Error::NotCommissioned`] if no sole fabric exists, or
     /// [`Error::Operational`] if the device has no entry on the fabric.
+    #[cfg(feature = "ota")]
     pub(crate) async fn store_resumption_record(
         &self,
         node_id: u64,

@@ -1098,6 +1098,7 @@ pub(crate) enum Command {
     /// Returns the parsed record rather than the stored bytes: the
     /// commissioner-identity check that decides whether it may be used at all
     /// is only possible on the actor, which owns the fabric state.
+    #[cfg(any(feature = "ota", test))]
     ResumptionRecordFor {
         node_id: u64,
         reply: oneshot::Sender<Result<Option<matter_crypto::ResumptionRecord>, Error>>,
@@ -1109,6 +1110,7 @@ pub(crate) enum Command {
     /// Carries the record itself rather than pre-serialized bytes: the
     /// commissioner-identity fingerprint stamped alongside it is only knowable
     /// on the actor, which owns the fabric state.
+    #[cfg(feature = "ota")]
     StoreResumptionRecord {
         node_id: u64,
         // Boxed: a `ResumptionRecord` embeds a full `MatterCertificate`, and an
@@ -2698,6 +2700,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                         .await,
                 );
             }
+            #[cfg(any(feature = "ota", test))]
             Command::ResumptionRecordFor { node_id, reply } => {
                 // Same identity binding as the outbound path. Here we are the
                 // RESPONDER: the device will present this record's id to our
@@ -2710,6 +2713,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     .map(|fabric_id| self.usable_resumption_record(fabric_id, node_id));
                 let _ = reply.send(result);
             }
+            #[cfg(feature = "ota")]
             Command::StoreResumptionRecord {
                 node_id,
                 record,
@@ -5220,6 +5224,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
 
     /// Replace the stored CASE resumption record for `node_id` on the sole
     /// fabric (best-effort persist). See [`Command::StoreResumptionRecord`].
+    #[cfg(feature = "ota")]
     fn handle_store_resumption_record(
         &mut self,
         node_id: u64,
@@ -15527,6 +15532,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "ota")]
     /// Send `NotifyUpdateApplied` on an already-established secured session and
     /// assert the provider returns a success status. `token` and
     /// `software_version` come from the download phase (possibly on a different
@@ -15575,6 +15581,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "ota")]
     /// CASE resumption handshake: sends a Sigma1 with resumption fields built
     /// from `record`, expects `Sigma2_Resume`, closes with a success
     /// `StatusReport` (absorbing the provider's standalone ack), and returns
@@ -15664,6 +15671,7 @@ mod tests {
         (sessions, sid)
     }
 
+    #[cfg(feature = "ota")]
     /// Build a fresh set of device CASE credentials under `fabric` (a new key
     /// pair + a newly issued NOC). The NOC is signed by `fabric`'s RCAC so the
     /// provider will accept it on a full handshake; on the resumed path the NOC
@@ -16282,6 +16290,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(feature = "ota")]
     /// Full (non-resumed) CASE handshake driver: Sigma1 → Sigma2 → Sigma3 →
     /// success `StatusReport`. The `resume_case_handshake` counterpart for the
     /// full path. When `send_final_ack` is false the closing standalone ack of
