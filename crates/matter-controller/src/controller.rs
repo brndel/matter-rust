@@ -711,14 +711,18 @@ impl MatterController {
     ///
     /// # Errors
     ///
-    /// [`Error::ControllerStopped`] if the owning task has stopped.
+    /// [`Error::ControllerStopped`] if the owning task has stopped;
+    /// [`Error::Operational`] if a fabric's
+    /// [`compressed_fabric_id`](crate::FabricInfo::compressed_fabric_id)
+    /// cannot be derived (it always can for a valid fabric: the derivation's
+    /// error path exists only so the library never panics).
     pub async fn fabrics(&self) -> Result<Vec<crate::FabricInfo>, Error> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(Command::ListFabrics { reply })
             .await
             .map_err(|_| Error::ControllerStopped)?;
-        rx.await.map_err(|_| Error::ControllerStopped)
+        rx.await.map_err(|_| Error::ControllerStopped)?
     }
 
     /// Forget a node: drop ALL of the controller's own state for it — the

@@ -27,4 +27,13 @@ pub struct FabricInfo {
     /// issues NOCs directly under the RCAC (`false`, the default from
     /// [`crate::FabricConfig::new`]).
     pub icac_enabled: bool,
+    /// The fabric's 64-bit Compressed Fabric Identifier (Matter Core
+    /// §4.3.2.2), derived from the fabric's root public key and `fabric_id`.
+    ///
+    /// It is the `<CFID>` in the operational mDNS instance names of this
+    /// fabric's nodes (`<CFID>-<NODEID>`) and in the fabric's `_I<CFID>`
+    /// DNS-SD subtype. To build or recognise those instance names, use
+    /// [`operational_instance_name`](crate::operational_instance_name) and
+    /// [`parse_operational_instance_name`](crate::parse_operational_instance_name).
+    pub compressed_fabric_id: u64,
 }

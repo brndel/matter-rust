@@ -139,6 +139,7 @@ pub(crate) mod group;
 pub(crate) mod handshake_socket;
 pub(crate) mod icd;
 pub(crate) mod icd_listener;
+pub(crate) mod instance_name;
 pub mod node;
 pub(crate) mod node_info;
 pub(crate) mod opcreds;
@@ -164,6 +165,7 @@ pub use fabric_info::FabricInfo;
 pub use group::{GroupKeyMapEntry, GroupKeySet};
 pub use icd::{IcdClientType, IcdRegistration};
 pub use icd_listener::CheckIn;
+pub use instance_name::{operational_instance_name, parse_operational_instance_name};
 pub use matter_cert::MatterTime;
 pub use matter_codec::Value;
 /// Network (Wi-Fi/Thread) credentials for `MatterController::commission_ble`

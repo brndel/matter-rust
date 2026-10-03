@@ -1154,7 +1154,7 @@ pub(crate) enum Command {
     /// Lets a caller check which `fabric_id`s already exist before calling
     /// [`Command::CreateFabric`] (issue #110).
     ListFabrics {
-        reply: oneshot::Sender<Vec<crate::FabricInfo>>,
+        reply: oneshot::Sender<Result<Vec<crate::FabricInfo>, Error>>,
     },
     /// Drop ALL of the controller's own local state for `node_id` — the
     /// persisted `DeviceEntry`, its cached CASE session, and any parked
@@ -2705,15 +2705,25 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 let _ = reply.send(nodes);
             }
             Command::ListFabrics { reply } => {
-                let fabrics = self
+                let fabrics: Result<Vec<crate::FabricInfo>, Error> = self
                     .state
                     .fabrics
                     .iter()
-                    .map(|f| crate::FabricInfo {
-                        fabric_id: f.fabric_id,
-                        commissioner_node_id: f.commissioner.node_id,
-                        node_count: f.devices.len(),
-                        icac_enabled: f.icac.is_some(),
+                    .map(|f| {
+                        // The same derivation `sole_compressed_fabric_id` names
+                        // the fabric's subtype and instance names with.
+                        let cfid = matter_crypto::derive_compressed_fabric_id(
+                            f.rcac_cert.public_key().as_bytes(),
+                            f.fabric_id,
+                        )
+                        .map_err(|e| Error::Operational(e.to_string()))?;
+                        Ok(crate::FabricInfo {
+                            fabric_id: f.fabric_id,
+                            commissioner_node_id: f.commissioner.node_id,
+                            node_count: f.devices.len(),
+                            icac_enabled: f.icac.is_some(),
+                            compressed_fabric_id: u64::from_be_bytes(cfid),
+                        })
                     })
                     .collect();
                 let _ = reply.send(fabrics);
@@ -7969,6 +7979,55 @@ mod tests {
         assert_eq!(fabrics.len(), 2);
     }
 
+    /// `fabric`'s compressed fabric id, derived straight from its root key
+    /// with `matter_crypto` — independently of the `ListFabrics` handler — to
+    /// build the expected `FabricInfo` in the `fabrics()` tests.
+    fn compressed_fabric_id_of(fabric: &crate::state::FabricEntry) -> u64 {
+        u64::from_be_bytes(
+            matter_crypto::derive_compressed_fabric_id(
+                fabric.rcac_cert.public_key().as_bytes(),
+                fabric.fabric_id,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// The compressed fabric id of every fabric in `store`'s saved snapshot,
+    /// in order. A fabric's root key is random, so a test that created its
+    /// fabric through the public API reads the key back from the store.
+    fn stored_compressed_fabric_ids(store: &MemStore) -> Vec<u64> {
+        let bytes = store.load().unwrap().expect("snapshot saved");
+        crate::snapshot::deserialize(&bytes)
+            .unwrap()
+            .fabrics
+            .iter()
+            .map(compressed_fabric_id_of)
+            .collect()
+    }
+
+    /// `FabricInfo::compressed_fabric_id` is the very value the actor names
+    /// its own fabric's operational instances and DNS-SD subtype with
+    /// (`sole_compressed_fabric_id`), for a real created fabric. A caller
+    /// matching browsed instance names against it therefore matches exactly
+    /// the names the controller itself resolves.
+    #[tokio::test]
+    async fn fabrics_reports_the_compressed_fabric_id_the_actor_browses_with() {
+        let mut actor = actor_with_one_fabric();
+        let own = u64::from_be_bytes(actor.sole_compressed_fabric_id().unwrap());
+
+        let (reply, rx) = oneshot::channel();
+        actor.dispatch_ready(Command::ListFabrics { reply }).await;
+        let fabrics = rx.await.unwrap().expect("fabrics");
+
+        assert_eq!(fabrics.len(), 1);
+        assert_eq!(fabrics[0].compressed_fabric_id, own);
+        assert_ne!(own, 0, "a real fabric's CFID is not the zero placeholder");
+        assert_eq!(
+            fabrics[0].compressed_fabric_id,
+            compressed_fabric_id_of(actor.sole_fabric().unwrap()),
+        );
+    }
+
     /// `fabrics()` is empty before any fabric is created, and reflects each
     /// fabric's typed metadata (fabric id, commissioner node id, node count,
     /// ICAC-in-use) after creation.
@@ -7977,7 +8036,7 @@ mod tests {
         let store = Arc::new(MemStore::default());
         let (io, _peer) = InMemoryDatagram::pair();
         let controller = crate::controller::MatterController::with_components(
-            store,
+            store.clone(),
             io,
             NullDiscovery,
             Arc::new(matter_commissioning::SystemNocRng),
@@ -8005,6 +8064,7 @@ mod tests {
                 commissioner_node_id: 1,
                 node_count: 0,
                 icac_enabled: false,
+                compressed_fabric_id: stored_compressed_fabric_ids(&store)[0],
             }]
         );
     }
@@ -8017,7 +8077,7 @@ mod tests {
         let store = Arc::new(MemStore::default());
         let (io, _peer) = InMemoryDatagram::pair();
         let controller = crate::controller::MatterController::with_components(
-            store,
+            store.clone(),
             io,
             NullDiscovery,
             Arc::new(matter_commissioning::SystemNocRng),
@@ -8041,6 +8101,7 @@ mod tests {
                 commissioner_node_id: 1,
                 node_count: 0,
                 icac_enabled: true,
+                compressed_fabric_id: stored_compressed_fabric_ids(&store)[0],
             }]
         );
     }
@@ -8063,6 +8124,7 @@ mod tests {
             product_id: Some(0x8000),
             label: Some("plug".to_string()),
         });
+        let expected_cfid = compressed_fabric_id_of(&fabric);
 
         let store = Arc::new(MemStore::default());
         store
@@ -8093,6 +8155,7 @@ mod tests {
                 commissioner_node_id: 1,
                 node_count: 1,
                 icac_enabled: false,
+                compressed_fabric_id: expected_cfid,
             }]
         );
     }
