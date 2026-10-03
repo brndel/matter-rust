@@ -22,6 +22,43 @@ From `0.1.0` onward the headings mean what they say, and
 while a crate is `0.x`, a **breaking change bumps the minor version** — these
 APIs have had no outside users yet and are expected to move.
 
+## matter-controller 0.18.0
+
+Your fabric's compressed fabric id is now public, with helpers to build and
+parse operational mDNS instance names. A minor release for new public API
+(additive: `FabricInfo` is `#[non_exhaustive]`). No other crate changes and
+nothing else is re-released. Nothing changes on the wire.
+
+### Added — `FabricInfo::compressed_fabric_id`
+
+The fabric's 64-bit Compressed Fabric Identifier (Matter Core §4.3.2.2),
+derived from its root public key and fabric id. It is the `<CFID>` in the
+operational mDNS instance names of the fabric's nodes (`<CFID>-<NODEID>`) and
+in its `_I<CFID>` DNS-SD subtype, and it is the same value the controller
+itself uses when it resolves a node or watches for one to come back.
+
+The use case is matching operational mDNS instances to your fabric. If you run
+your own `_matter._tcp` browse, you can now tell which instances are your
+nodes, for example to call `MatterController::resubscribe_now` when one of
+them re-appears.
+
+### Added — `operational_instance_name` and `parse_operational_instance_name`
+
+`operational_instance_name(compressed_fabric_id, node_id)` returns the instance
+name `<CFID>-<NODEID>`, each as 16 uppercase hex digits — exactly the name the
+controller resolves. `parse_operational_instance_name(name)` is its inverse and
+returns `Some((compressed_fabric_id, node_id))`. It accepts upper- or
+lower-case hex, since mDNS names compare case-insensitively, and rejects
+anything that is not exactly 16 hex digits, `-`, 16 hex digits. Pass the
+instance label only: strip the `._matter._tcp.local.` service type first.
+
+### Changed — `fabrics()` can return `Error::Operational`
+
+`MatterController::fabrics` now derives each fabric's compressed fabric id, and
+returns `Error::Operational` if that derivation fails. It cannot fail for a
+valid fabric; the error exists so the library never panics. The signature is
+unchanged.
+
 ## matter-controller 0.17.0
 
 Subscriptions are sturdier in five situations that all occur in normal use:
