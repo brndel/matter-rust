@@ -19802,6 +19802,11 @@ mod tests {
         found_polls: Vec<QueryHandle>,
         /// Every `requery` call, in order.
         requeries: Vec<QueryHandle>,
+        /// Released into `subtype_records` / `subtype_found` by the next
+        /// `requery` of the subtype handle: a device that answers a fresh query
+        /// but whose own announcement never reached the browse.
+        requery_records: Vec<MatterService>,
+        requery_found: Vec<String>,
         /// Return the base handle from `query_operational_fabric` too, as a
         /// `Discovery` that keeps the trait default does.
         equal_handles: bool,
@@ -19913,7 +19918,14 @@ mod tests {
             }
         }
         fn requery(&mut self, h: QueryHandle) {
-            self.0.lock().unwrap().requeries.push(h);
+            let mut s = self.0.lock().unwrap();
+            s.requeries.push(h);
+            if h == WATCH_SUBTYPE_HANDLE {
+                let records = std::mem::take(&mut s.requery_records);
+                let found = std::mem::take(&mut s.requery_found);
+                s.subtype_records.extend(records);
+                s.subtype_found.extend(found);
+            }
         }
     }
 
@@ -24231,5 +24243,151 @@ mod tests {
             Some(t0 + step * 19),
             "and the cadence restarted: the next interval is two steps"
         );
+    }
+
+    /// Spec 2026-10-04 test 10, end to end over the loopback harness: a
+    /// subscription goes silent, its retry fails against the powered-off
+    /// device and is pushed 10 minutes out. The device comes back, but its
+    /// announcement never reaches the controller's subtype browse: it shows up
+    /// only in answer to a fresh query. The watch's re-query finds it, and the
+    /// subscription is re-established within about one cadence step — long
+    /// before the 600 s retry.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // one linear scenario: subscribe, outage, backoff, missed announcement, re-query, recovery
+    async fn a_requery_finds_a_device_whose_announcement_was_missed() {
+        let Harness {
+            store,
+            ctrl_io,
+            dev_io,
+            ctrl_addr,
+            discovery,
+            device_creds,
+            device_roots,
+            device_node_id,
+        } = loopback_harness();
+        let state = crate::snapshot::deserialize(&store.load().unwrap().unwrap()).unwrap();
+        let second_life = mint_device_creds(&state, device_node_id);
+        let (watch, watch_state) = watch_discovery();
+        let record = MatterService::new(
+            discovery.instance_name.clone(),
+            ServiceKind::Operational,
+            vec![discovery.addr.ip()],
+            discovery.addr.port(),
+            std::collections::HashMap::new(),
+        );
+        // The device is on the network at the start.
+        watch_state
+            .lock()
+            .unwrap()
+            .subtype_records
+            .push(record.clone());
+
+        let (power_back, power_back_rx) = oneshot::channel::<()>();
+        let device = tokio::spawn(run_rebooting_subscription_device(
+            dev_io,
+            ctrl_addr,
+            (device_creds, device_roots),
+            second_life,
+            power_back_rx,
+        ));
+        let controller = crate::controller::MatterController::with_components(
+            store,
+            ctrl_io,
+            watch,
+            Arc::new(SystemNocRng),
+            None,
+            crate::builder::DEFAULT_ADMIN_VENDOR_ID,
+        )
+        .expect("open");
+
+        let mut sub = tokio::time::timeout(
+            Duration::from_secs(10),
+            controller.node(device_node_id).subscribe(
+                &[matter_interaction::ReadPath::concrete(1, 0x06, 0x0000)],
+                &[],
+                1,
+                0,
+            ),
+        )
+        .await
+        .expect("subscribe must not hang")
+        .expect("subscribe");
+
+        // 1. The device loses power; liveness trips after LIVENESS_GRACE.
+        let lost = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match sub.next().await {
+                    Some(SubscriptionEvent::Resubscribing { .. }) => return true,
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        assert!(
+            matches!(lost, Ok(true)),
+            "liveness must time out (got {lost:?})"
+        );
+
+        // 2. The immediate retry's fresh CASE handshake goes unanswered and
+        //    the entry comes back to the queue; push it 10 minutes out.
+        let backed_off = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if controller
+                    .set_resubscribe_schedule(device_node_id, 10, Duration::from_secs(600))
+                    .await
+                    == 1
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            backed_off.is_ok(),
+            "the failed retry must come back to the queue"
+        );
+
+        // 3. The device is back, but its announcement was missed: it answers
+        //    only the watch's next re-query (a new PTR plus its record).
+        let _ = power_back.send(());
+        let requeries_before = {
+            let mut s = watch_state.lock().unwrap();
+            s.requery_records.push(record);
+            s.requery_found.push(discovery.instance_name.clone());
+            s.requeries.len()
+        };
+        let bound = ADVERT_REQUERY_MAX + Duration::from_secs(12);
+        let recovered = tokio::time::timeout(bound, async {
+            loop {
+                match sub.next().await {
+                    Some(SubscriptionEvent::Established { .. }) => return true,
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        assert!(
+            matches!(recovered, Ok(true)),
+            "a re-query must find the device and re-establish the subscription \
+             long before the 600 s retry (got {recovered:?})"
+        );
+        {
+            let s = watch_state.lock().unwrap();
+            assert!(
+                s.requeries.len() > requeries_before,
+                "the device was found through a re-query"
+            );
+            assert_eq!(
+                s.requery_found,
+                Vec::<String>::new(),
+                "its answer was released by that re-query"
+            );
+        }
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), sub.cancel()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), device).await;
     }
 }
