@@ -307,8 +307,11 @@ pub trait Discovery {
     /// PTR record since the last call: an instance appearing, or re-appearing
     /// after its record expired. Event semantics: each name is returned once,
     /// is never replayed to a handle attached later, and says nothing about
-    /// whether the instance has resolved yet. The default returns nothing; a
-    /// `Discovery` that cannot observe PTR additions keeps it.
+    /// whether the instance has resolved yet. An instance the browse already
+    /// reported as found is not reported again unless the resolver reported it
+    /// removed in between: a resolver re-delivering a PTR it already holds has
+    /// not seen a new one. The default returns nothing; a `Discovery` that
+    /// cannot observe PTR additions keeps it.
     ///
     /// # What it is for
     ///

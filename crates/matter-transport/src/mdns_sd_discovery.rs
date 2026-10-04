@@ -68,13 +68,16 @@
 //! # Found events
 //!
 //! [`Discovery::poll_found`] reports mdns-sd's `ServiceFound`, which the daemon
-//! emits only when a **new** PTR record enters its cache: an instance
-//! appearing, or re-appearing after its record expired. Each event is buffered
-//! per handle as an instance name, fanned out to every handle of the browse
-//! like a record, never replayed to a handle attached later, and capped at 256
-//! names per handle (oldest dropped). `poll_results` and `poll_found` share one
-//! drain of the browse, so the order in which a caller makes the two calls does
-//! not matter.
+//! emits when a **new** PTR record enters its cache — an instance appearing,
+//! or re-appearing after its record expired — and also for every PTR it
+//! already caches when a browse is (re-)issued. The adapter tells the two
+//! apart: it remembers, per browse, the instances it has reported and not
+//! since seen removed (`ServiceRemoved`), and does not report those again.
+//! Each event is buffered per handle as an instance name, fanned out to every
+//! handle of the browse like a record, never replayed to a handle attached
+//! later, and capped at 256 names per handle (oldest dropped). `poll_results`
+//! and `poll_found` share one drain of the browse, so the order in which a
+//! caller makes the two calls does not matter.
 //!
 //! # Diagnostics
 //!
@@ -105,7 +108,7 @@
 //!
 //! [`ServiceEvent`]: mdns_sd::ServiceEvent
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use mdns_sd::{Receiver, ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperty};
@@ -192,6 +195,25 @@ struct BrowseState {
     /// attached after it never sees it. Each buffer is capped at
     /// [`FOUND_BUFFER_CAP`], oldest dropped.
     found: HashMap<QueryHandle, Vec<String>>,
+    /// The instances this browse has reported as found (`ServiceFound`) and
+    /// not seen removed (`ServiceRemoved`) since: the PTRs it believes the
+    /// daemon holds. A `ServiceFound` for a name already here re-delivers a
+    /// PTR the daemon already held — mdns-sd replays every cached PTR to a
+    /// re-issued browse — so it is not buffered for
+    /// [`Discovery::poll_found`] (spec 2026-10-04 §3.1).
+    ///
+    /// Keyed exactly like `surfaced` ([`instance_name_from_fullname`]) and
+    /// **verbatim, not lowercased**: mdns-sd compares PTR aliases
+    /// case-sensitively (`dns_parser.rs` 876-878) and its `ServiceFound` /
+    /// `ServiceRemoved` carry the cached alias verbatim, so two spellings are
+    /// two daemon cache entries and must be two entries here.
+    ///
+    /// A genuine return is never suppressed: every way a PTR leaves the
+    /// daemon's cache (TTL expiry or goodbye, an expired incoming record, an
+    /// interface going away) emits `ServiceRemoved`, which removes the name;
+    /// stopping the browse drops this state with it; and stopping a base-type
+    /// browse wipes only base PTRs, never a subtype browse's.
+    present: HashSet<String>,
     /// Test-only queue of events "sent by the daemon" but not yet drained, so a
     /// test can check that `poll_results` and `poll_found` share one drain. The
     /// real `Receiver`'s sender lives inside the daemon and cannot be written
@@ -341,6 +363,7 @@ impl MdnsSdDiscovery {
                     pending: HashMap::new(),
                     surfaced: HashMap::new(),
                     found: HashMap::new(),
+                    present: HashSet::new(),
                     #[cfg(test)]
                     injected: Vec::new(),
                 },
@@ -405,6 +428,7 @@ impl MdnsSdDiscovery {
                 &mut browse.pending,
                 &mut browse.surfaced,
                 &mut browse.found,
+                &mut browse.present,
                 event,
             );
         }
@@ -440,14 +464,15 @@ impl MdnsSdDiscovery {
             pending,
             surfaced,
             found,
+            present,
             ..
         } = browse;
         while let Ok(event) = receiver.try_recv() {
-            fan_out_event(service_type, pending, surfaced, found, event);
+            fan_out_event(service_type, pending, surfaced, found, present, event);
         }
         #[cfg(test)]
         for event in injected {
-            fan_out_event(service_type, pending, surfaced, found, event);
+            fan_out_event(service_type, pending, surfaced, found, present, event);
         }
     }
 }
@@ -601,7 +626,10 @@ impl Discovery for MdnsSdDiscovery {
 
     /// Drain the shared browse once and return **this** handle's found events:
     /// the instance names mdns-sd reported as `ServiceFound` (a new PTR record
-    /// entering its cache) since this handle's last call.
+    /// entering its cache) since this handle's last call — except an instance
+    /// this browse already reported and has not seen `ServiceRemoved` for
+    /// since: that `ServiceFound` re-delivers a PTR the daemon already held.
+    /// Instance names are compared verbatim, as mdns-sd compares them.
     ///
     /// Shares one drain with [`Discovery::poll_results`], so the order of the
     /// two calls never matters. A handle attached after a `ServiceFound` does
@@ -633,26 +661,29 @@ impl Discovery for MdnsSdDiscovery {
 /// `browse` is the exact string this browse was opened with, logged with every
 /// surfaced record so a trace shows **which** browse produced it — base type or
 /// compressed-fabric subtype (issue #113). A `ServiceFound` is also appended,
-/// as an instance name, to every handle's found buffer ([`buffer_found`]), and
-/// a `ServiceRemoved` drops its instance from `surfaced` (never from a
-/// handle's buffer).
+/// as an instance name, to every handle's found buffer unless the instance is
+/// already in `present` ([`buffer_found`]), and a `ServiceRemoved` drops its
+/// instance from `surfaced` and `present` (never from a handle's buffer).
 fn fan_out_event(
     browse: &str,
     pending: &mut HashMap<QueryHandle, Vec<MatterService>>,
     surfaced: &mut HashMap<String, MatterService>,
     found: &mut HashMap<QueryHandle, Vec<String>>,
+    present: &mut HashSet<String>,
     event: ServiceEvent,
 ) {
     if let ServiceEvent::ServiceFound(_, fullname) = &event {
-        buffer_found(browse, found, fullname);
+        buffer_found(browse, present, found, fullname);
     }
     // The daemon no longer holds this instance, so the replay cache must stop
-    // offering it to late handles. Same split as `buffer_found` and the
-    // resolved-record path, so the key matches the one `surfaced` was filled
-    // under. Still traced below with every other non-resolved event.
+    // offering it to late handles, and its next `ServiceFound` is a genuine
+    // return. Same split as `buffer_found` and the resolved-record path, so the
+    // key matches the one `surfaced` and `present` were filled under. Still
+    // traced below with every other non-resolved event.
     if let ServiceEvent::ServiceRemoved(_, fullname) = &event {
         if let Some(instance) = instance_name_from_fullname(fullname) {
             surfaced.remove(&instance);
+            present.remove(&instance);
         }
     }
     match event {
@@ -693,14 +724,21 @@ fn fan_out_event(
 
 /// Append the instance named by a `ServiceFound` fullname to every attached
 /// handle's found buffer, dropping a buffer's oldest name first once it holds
-/// [`FOUND_BUFFER_CAP`].
+/// [`FOUND_BUFFER_CAP`] — unless the instance is already in `present`.
 ///
 /// mdns-sd reports the PTR's alias, `<instance>.<service-type>.local.`; for a
 /// subtype browse that is the base-type instance fullname, so the same
 /// [`instance_name_from_fullname`] split applies to both kinds of browse. A
 /// fullname with no instance label is dropped (logged at `debug`), never
-/// buffered as an empty name.
-fn buffer_found(browse: &str, found: &mut HashMap<QueryHandle, Vec<String>>, fullname: &str) {
+/// buffered as an empty name. An instance already in `present` was reported
+/// and has not been removed since, so this `ServiceFound` re-delivers a PTR
+/// the daemon already held: it is suppressed (logged at `trace`).
+fn buffer_found(
+    browse: &str,
+    present: &mut HashSet<String>,
+    found: &mut HashMap<QueryHandle, Vec<String>>,
+    fullname: &str,
+) {
     let Some(instance) = instance_name_from_fullname(fullname) else {
         tracing::debug!(
             target: LOG_TARGET,
@@ -710,6 +748,15 @@ fn buffer_found(browse: &str, found: &mut HashMap<QueryHandle, Vec<String>>, ful
         );
         return;
     };
+    if !present.insert(instance.clone()) {
+        tracing::trace!(
+            target: LOG_TARGET,
+            browse,
+            instance = %instance,
+            "mDNS ServiceFound suppressed: already present (a replay of a cached PTR)",
+        );
+        return;
+    }
     for (handle, buffer) in found {
         if buffer.len() >= FOUND_BUFFER_CAP {
             let dropped = buffer.remove(0);
@@ -904,7 +951,7 @@ fn kind_from_service_type(service_type: &str) -> Option<ServiceKind> {
 #[allow(clippy::unwrap_used)] // Test-code carve-out: see CLAUDE.md.
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::net::Ipv6Addr;
     use std::time::{Duration, Instant};
 
@@ -1720,6 +1767,7 @@ mod tests {
         let mut pending: HashMap<QueryHandle, Vec<MatterService>> = HashMap::new();
         let mut surfaced: HashMap<String, MatterService> = HashMap::new();
         let mut found: HashMap<QueryHandle, Vec<String>> = HashMap::new();
+        let mut present: HashSet<String> = HashSet::new();
         pending.insert(h, Vec::new());
         found.insert(h, Vec::new());
         for i in 0..=FOUND_BUFFER_CAP {
@@ -1728,6 +1776,7 @@ mod tests {
                 &mut pending,
                 &mut surfaced,
                 &mut found,
+                &mut present,
                 found_event(ty, &format!("cap-{i:03}._matter._tcp.local.")),
             );
         }
@@ -1743,5 +1792,98 @@ mod tests {
             Some(format!("cap-{FOUND_BUFFER_CAP:03}").as_str()),
         );
         assert!(pending[&h].is_empty(), "a found event is not a record");
+    }
+
+    // ---------------------------------------------------------------------
+    // Replay suppression (`present`, spec 2026-10-04 §3.1).
+    // ---------------------------------------------------------------------
+
+    /// Spec 2026-10-04 test 1: a found instance is reported once; a second
+    /// `ServiceFound` with no `ServiceRemoved` between is a re-delivery of a
+    /// PTR the daemon already held, not a new one; after a removal, a found
+    /// event is a genuine return and is reported again.
+    #[test]
+    fn a_found_instance_is_reported_again_only_after_it_was_removed() {
+        let fullname = "present-a._matter._tcp.local.";
+        let mut d = MdnsSdDiscovery::new().unwrap();
+        let h = d.query_operational_fabric(TEST_CFID).unwrap();
+        d.deliver_for_type_for_test(TEST_SUBTYPE, found_event(TEST_SUBTYPE, fullname));
+        assert!(names(&d.poll_found(h), "present-a"), "first appearance");
+        d.deliver_for_type_for_test(TEST_SUBTYPE, found_event(TEST_SUBTYPE, fullname));
+        assert!(
+            !names(&d.poll_found(h), "present-a"),
+            "a second Found with no Removed between is a replay"
+        );
+        d.deliver_for_type_for_test(TEST_SUBTYPE, removed_event(TEST_SUBTYPE, fullname));
+        d.deliver_for_type_for_test(TEST_SUBTYPE, found_event(TEST_SUBTYPE, fullname));
+        assert!(
+            names(&d.poll_found(h), "present-a"),
+            "removed, then found again: a genuine return"
+        );
+        d.stop_query(h);
+    }
+
+    /// Spec 2026-10-04 test 2: a replayed PTR (a requery replays every cached
+    /// one) reaches no handle as a found event, while its resolved record is
+    /// still re-delivered by `poll_results` (latest-wins consumers are
+    /// unaffected).
+    #[test]
+    fn a_replayed_found_event_is_reported_to_no_handle() {
+        let fullname = "replay-a._matter._tcp.local.";
+        let mut d = MdnsSdDiscovery::new().unwrap();
+        let first = d.query_operational_fabric(TEST_CFID).unwrap();
+        let second = d.query_operational_fabric(TEST_CFID).unwrap();
+        d.deliver_for_type_for_test(TEST_SUBTYPE, found_event(TEST_SUBTYPE, fullname));
+        d.deliver_for_type_for_test(
+            TEST_SUBTYPE,
+            resolved_event_under_subtype("replay-a", TEST_SUBTYPE),
+        );
+        for h in [first, second] {
+            assert!(names(&d.poll_found(h), "replay-a"));
+            assert!(contains(&d.poll_results(h), "replay-a"));
+        }
+        // The replay: the same PTR and record again, no removal between.
+        d.deliver_for_type_for_test(TEST_SUBTYPE, found_event(TEST_SUBTYPE, fullname));
+        d.deliver_for_type_for_test(
+            TEST_SUBTYPE,
+            resolved_event_under_subtype("replay-a", TEST_SUBTYPE),
+        );
+        for h in [first, second] {
+            assert!(
+                !names(&d.poll_found(h), "replay-a"),
+                "a replayed PTR is not a new one"
+            );
+            assert!(
+                contains(&d.poll_results(h), "replay-a"),
+                "the resolved record itself is re-delivered"
+            );
+        }
+        d.stop_query(first);
+        d.stop_query(second);
+    }
+
+    /// Spec 2026-10-04 test 5: `present` is keyed verbatim, matching mdns-sd's
+    /// case-sensitive PTR alias comparison (`dns_parser.rs` 876-878): two
+    /// spellings are two cache entries there and two entries here.
+    #[test]
+    fn present_instance_keys_are_case_sensitive_like_mdns_sd() {
+        let upper = "CASE-TEST._matter._tcp.local.";
+        let lower = "case-test._matter._tcp.local.";
+        let mut d = MdnsSdDiscovery::new().unwrap();
+        let h = d.query_operational_fabric(TEST_CFID).unwrap();
+        d.deliver_for_type_for_test(TEST_SUBTYPE, found_event(TEST_SUBTYPE, upper));
+        assert!(names(&d.poll_found(h), "CASE-TEST"));
+        d.deliver_for_type_for_test(TEST_SUBTYPE, removed_event(TEST_SUBTYPE, lower));
+        d.deliver_for_type_for_test(TEST_SUBTYPE, found_event(TEST_SUBTYPE, upper));
+        assert!(
+            !names(&d.poll_found(h), "CASE-TEST"),
+            "removing the lower-case spelling must not remove the upper-case one"
+        );
+        d.deliver_for_type_for_test(TEST_SUBTYPE, found_event(TEST_SUBTYPE, lower));
+        assert!(
+            names(&d.poll_found(h), "case-test"),
+            "the lower-case spelling is its own entry"
+        );
+        d.stop_query(h);
     }
 }
