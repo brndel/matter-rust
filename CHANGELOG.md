@@ -22,6 +22,88 @@ From `0.1.0` onward the headings mean what they say, and
 while a crate is `0.x`, a **breaking change bumps the minor version** — these
 APIs have had no outside users yet and are expected to move.
 
+## matter-transport 0.7.3 + matter-controller 0.18.1
+
+A subscription waiting for its device to come back no longer depends on the
+device's own announcement reaching the controller. While it waits, the
+controller now re-sends its mDNS query for the fabric's operational nodes on a
+backing-off cadence, so a device that is back on the network is found within
+about 5 minutes at worst, instead of whenever the mDNS daemon next queries on
+its own schedule (up to an hour later). Reported from the field by WeaveHome:
+after a 65-minute outage a Tapo H100 bridge came back, but the controller
+noticed only about 9.5 minutes later; from that moment the subscription was
+re-established in under a second.
+
+Both are patch releases. `matter-transport` adds one `Discovery` method with a
+default implementation, so no implementor breaks. `matter-controller` changes
+behaviour only and now requires `matter-transport` 0.7.3.
+`matter-commissioning`'s `0.7.0` requirement already accepts 0.7.3, so it is
+not re-released. On the wire, the only change is the extra mDNS queries
+described below.
+
+### matter-transport: Added — `Discovery::requery`
+
+`Discovery::requery(handle)` asks the resolver to send a fresh query for a
+browse now, instead of waiting for its own retry schedule. What turns up is
+reported through `poll_results` and `poll_found` as usual. The default does
+nothing, for a `Discovery` that cannot force a query.
+
+`MdnsSdDiscovery` implements it by re-issuing the browse. mdns-sd then restarts
+its query sequence for that service type (about five small multicast queries
+over the next 15 s, each listing the answers the daemon already holds, so
+devices it already knows stay silent) and replays every record it has cached.
+Nothing the previous browse had not yet delivered is lost in the switch.
+
+### matter-transport: Changed — `poll_found` reports an instance once per appearance
+
+`MdnsSdDiscovery::poll_found` no longer reports an instance it already
+reported until mdns-sd reports it removed. A re-query's replay of cached
+records therefore does not look like a device coming back. This tightens the
+"new PTR record" contract of `Discovery::poll_found`, whose documentation now
+says so explicitly. Instance names are compared exactly as mdns-sd compares
+them (case-sensitively).
+
+One imprecision is accepted: mdns-sd also reports an instance removed when
+only its SRV or address records expire while it is still listed. The next
+re-query then reports it found once more. For the controller that means at
+most one extra resubscribe attempt per outage, limited by its 30 s
+per-subscription cooldown.
+
+After a re-query, `poll_results` delivers the replayed records again, to every
+handle of the browse. Consumers that keep the latest record per instance, as
+the controller does, are unaffected; a handle that is never polled grows by up
+to one record per instance per re-query until it is polled or stopped.
+
+### matter-controller: Changed — the resubscribe watch re-queries
+
+While a subscription is waiting to be re-established, the controller re-sends
+its fabric's operational subtype query (`_I<fabric>._sub._matter._tcp`) 30 s
+after it starts watching, then 60, 120 and 240 s apart, then every 5 minutes,
+for as long as anything waits (RFC 6762 §5.2 asks continuous queries to back
+off). A node that newly starts waiting restarts the sequence at 30 s. A device
+that answers is handled exactly like one that announced itself: its waiting
+subscriptions are retried at once with their backoff reset.
+
+Costs: while anything waits, each re-query makes the mDNS daemon send a few
+small queries over about 15 s and replay the records it holds for the fabric;
+the controller drains that replay early (after 250 ms instead of 1 s). No
+re-query is sent while the controller's short-lived base-type `_matter._tcp`
+fallback browse is open, since a node resolve is then already driving queries.
+
+Known limitations, unchanged:
+
+- Thread devices behind a border router whose SRP advertising proxy kept
+  serving their records while they were offline produce no new record when
+  they return, re-query or not. Call `resubscribe_now` from a better signal.
+- An outage shorter than the device's record lifetime still produces no new
+  record; recovery follows the backoff, as before.
+- Detection by the controller alone can take up to the current cadence step
+  (5 minutes). If you run your own `_matter._tcp` browse, calling
+  `resubscribe_now` when one of your nodes appears (see
+  `FabricInfo::compressed_fabric_id` in 0.18.0) remains the fast path.
+- A custom `Discovery` gets the re-query only if it overrides `requery`;
+  otherwise detection waits for its resolver's own queries, as before.
+
 ## matter-controller 0.18.0
 
 Your fabric's compressed fabric id is now public, with helpers to build and
