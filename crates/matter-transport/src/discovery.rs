@@ -309,9 +309,10 @@ pub trait Discovery {
     /// is never replayed to a handle attached later, and says nothing about
     /// whether the instance has resolved yet. An instance the browse already
     /// reported as found is not reported again unless the resolver reported it
-    /// removed in between: a resolver re-delivering a PTR it already holds has
-    /// not seen a new one. The default returns nothing; a `Discovery` that
-    /// cannot observe PTR additions keeps it.
+    /// removed in between: a resolver re-delivering a PTR it already holds (as
+    /// a [`Self::requery`] may make it do) has not seen a new one. The default
+    /// returns nothing; a `Discovery` that cannot observe PTR additions keeps
+    /// it.
     ///
     /// # What it is for
     ///
@@ -336,6 +337,21 @@ pub trait Discovery {
         // additions has nothing to report for any handle.
         let _ = handle;
         Vec::new()
+    }
+
+    /// Ask the resolver to send a fresh query for `handle`'s browse now, instead of
+    /// waiting for its own retry schedule. Records that appear in response are
+    /// reported through [`Self::poll_results`] / [`Self::poll_found`] as usual. A
+    /// requery may make the resolver replay records it already holds:
+    /// [`Self::poll_results`] may then deliver those records again (latest-wins
+    /// consumers are unaffected), and [`Self::poll_found`] does not report an
+    /// instance the browse already reported as found unless the resolver reported
+    /// it removed in between. May restart the resolver's internal retry schedule.
+    /// The default does nothing, for a `Discovery` that cannot force a query.
+    fn requery(&mut self, handle: QueryHandle) {
+        // Unused on purpose: an implementation that cannot force a query has
+        // nothing to do for any handle.
+        let _ = handle;
     }
 }
 
@@ -455,6 +471,43 @@ mod tests {
             d.poll_found(QueryHandle(999)).is_empty(),
             "unknown handle too"
         );
+    }
+
+    /// Spec 2026-10-04 test 6: `requery` is additive — an implementation
+    /// written before it existed keeps compiling — and the default does
+    /// nothing at all: it calls back into no method of the implementation.
+    #[test]
+    fn default_requery_does_nothing() {
+        struct PreRequeryDiscovery {
+            calls: usize,
+        }
+        impl Discovery for PreRequeryDiscovery {
+            fn publish(&mut self, _s: &MatterService) -> Result<()> {
+                self.calls += 1;
+                Ok(())
+            }
+            fn unpublish(&mut self, _n: &str, _k: ServiceKind) -> Result<()> {
+                self.calls += 1;
+                Ok(())
+            }
+            fn query(&mut self, _k: ServiceKind) -> Result<QueryHandle> {
+                self.calls += 1;
+                Ok(QueryHandle(5))
+            }
+            fn stop_query(&mut self, _h: QueryHandle) {
+                self.calls += 1;
+            }
+            fn poll_results(&mut self, _h: QueryHandle) -> Vec<MatterService> {
+                self.calls += 1;
+                Vec::new()
+            }
+        }
+
+        let mut d = PreRequeryDiscovery { calls: 0 };
+        let h = d.query(ServiceKind::Operational).unwrap();
+        d.requery(h);
+        d.requery(QueryHandle(999));
+        assert_eq!(d.calls, 1, "only the query above; requery did nothing");
     }
 
     #[test]

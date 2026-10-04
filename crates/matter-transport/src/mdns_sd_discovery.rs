@@ -79,6 +79,30 @@
 //! and `poll_found` share one drain of the browse, so the order in which a
 //! caller makes the two calls does not matter.
 //!
+//! # Re-query
+//!
+//! [`Discovery::requery`] re-issues a browse with `daemon.browse`, so mdns-sd
+//! sends a fresh PTR query now rather than at the next step of its own
+//! doubling schedule (1 s, 2 s, 4 s, … capped at an hour). mdns-sd accepts a
+//! response only if it answers one of its active queriers, so a device whose
+//! announcement it did not take is otherwise seen only at that next query. The
+//! query carries known answers, so devices whose PTR the daemon holds stay
+//! silent, and a device whose PTR expired while it was away answers with a new
+//! one: a `ServiceFound`.
+//!
+//! The swap is lossless. `daemon.browse` only queues a command, so the old
+//! receiver is kept and drained ahead of the new one until the new one's
+//! first event; mdns-sd sends `SearchStarted` first on a new listener, in the
+//! same step that makes it the live one, so nothing the old receiver carries
+//! can be overtaken. The re-issued browse replays every cached PTR as
+//! `ServiceFound` plus `ServiceResolved`: found events for instances already
+//! present are suppressed (above), resolved records are re-delivered (latest
+//! wins). Costs per requery: a replay of up to `1 + 2N` events into mdns-sd's
+//! 10-slot channel (the daemon thread waits for the next drain while it is
+//! full), a restarted query chain (the first query after 10–50 ms, then 1, 2,
+//! 4, 8, 16 s …: about five small multicast queries over ~15 s), and up to
+//! three ANY queries for any instance cached but not yet resolved.
+//!
 //! # Diagnostics
 //!
 //! Discovery is the one part of the stack whose failures are invisible from the
@@ -139,6 +163,36 @@ impl From<mdns_sd::Error> for Error {
     }
 }
 
+/// Where one browse's events are read from.
+///
+/// In production always the `Receiver` `ServiceDaemon::browse` returned. Its
+/// `Sender` lives inside the daemon thread and `flume` is not a dependency of
+/// this crate, so a test cannot put an event on such a channel at a moment of
+/// its choosing; the test-only variant stands in for it, so the requery
+/// switch-over ([`BrowseState::drain`]) can be driven event by event.
+enum EventSource {
+    /// The receiver `ServiceDaemon::browse` returned.
+    Daemon(Receiver<ServiceEvent>),
+    /// Test-only scripted channel. `Some(event)` is an event the daemon sent;
+    /// `None` is a gap: the read that takes it sees an empty channel, as a
+    /// drain that ran just before the daemon sent the next event would.
+    #[cfg(test)]
+    Scripted(std::sync::mpsc::Receiver<Option<ServiceEvent>>),
+}
+
+impl EventSource {
+    /// The next event already queued, or `None` when nothing is queued right
+    /// now. A closed channel also reads as `None`: the daemon holds the sender
+    /// until its thread exits, after which nothing arrives on any receiver.
+    fn try_next(&self) -> Option<ServiceEvent> {
+        match self {
+            Self::Daemon(receiver) => receiver.try_recv().ok(),
+            #[cfg(test)]
+            Self::Scripted(receiver) => receiver.try_recv().ok().flatten(),
+        }
+    }
+}
+
 /// The single browse we run for one DNS-SD service type, plus the handles
 /// sharing it.
 ///
@@ -147,9 +201,19 @@ impl From<mdns_sd::Error> for Error {
 /// [`QueryHandle`]. `pending` doubles as the refcount: the browse lives while
 /// it is non-empty.
 struct BrowseState {
-    /// The one `Receiver` mdns-sd handed back for this type. Drained by
-    /// whichever handle polls; the records go to every handle in `pending`.
-    receiver: Receiver<ServiceEvent>,
+    /// Where this browse's events come from: the `Receiver` mdns-sd handed
+    /// back for this type. Drained by whichever handle polls; the records go
+    /// to every handle in `pending`. A [`Discovery::requery`] installs the
+    /// receiver of a re-issued browse here and moves this one to `retiring`.
+    receiver: EventSource,
+    /// The receiver a [`Discovery::requery`] replaced, while the daemon may
+    /// still send to it: `daemon.browse` only queues a command, and until the
+    /// daemon thread runs it the querier's listener is still this one (an
+    /// event sent to a receiver nobody reads is lost — mdns-sd only logs the
+    /// failed send). Drained ahead of the new receiver and dropped at the
+    /// switch point, its first event ([`Self::drain`]). `Some` also means a
+    /// requery is in progress, and another one is then a no-op.
+    retiring: Option<EventSource>,
     /// Handles attached to this browse, each with the records surfaced since
     /// that handle last called [`Discovery::poll_results`].
     ///
@@ -161,6 +225,10 @@ struct BrowseState {
     /// add_or_update` reports `updated == false` for an unchanged record and
     /// never pushes it into `changes`), so a never-polled handle grows with
     /// record churn on the link, not with elapsed time.
+    ///
+    /// A [`Discovery::requery`] adds to that: mdns-sd replays every cached
+    /// resolved record of the type to the re-issued browse, so a never-polled
+    /// handle also grows by up to one record per instance per requery.
     pending: HashMap<QueryHandle, Vec<MatterService>>,
     /// The last record surfaced for each instance name, so a handle attached
     /// *after* a record was surfaced can be seeded with it.
@@ -220,6 +288,111 @@ struct BrowseState {
     /// to from a test.
     #[cfg(test)]
     injected: Vec<ServiceEvent>,
+}
+
+impl BrowseState {
+    /// A browse just opened on `receiver`, with no handles attached yet.
+    fn new(receiver: EventSource) -> Self {
+        Self {
+            receiver,
+            retiring: None,
+            pending: HashMap::new(),
+            surfaced: HashMap::new(),
+            found: HashMap::new(),
+            present: HashSet::new(),
+            #[cfg(test)]
+            injected: Vec::new(),
+        }
+    }
+
+    /// Start a requery's switch-over: `receiver`, from a fresh `daemon.browse`
+    /// of this browse's string, becomes the current receiver, and the old one
+    /// retires until [`Self::drain`] sees the switch point. The per-handle
+    /// buffers, `surfaced` and `present` are untouched.
+    fn begin_requery(&mut self, receiver: EventSource) {
+        let old = std::mem::replace(&mut self.receiver, receiver);
+        self.retiring = Some(old);
+    }
+
+    /// Drain every event queued for this browse and fan each out to every
+    /// attached handle ([`fan_out_event`]): resolved records into `pending`
+    /// (and `surfaced`), found events into `found`.
+    ///
+    /// While a requery is in progress (`retiring` is `Some`), the order is
+    /// what makes the swap lossless (spec 2026-10-04 §3.1, review B1).
+    /// mdns-sd sends `SearchStarted` to a new listener first, in the same
+    /// daemon step that installs it as the querier's listener
+    /// (`exec_command_browse`, mdns-sd 0.21.3 `service_daemon.rs` 3857 then
+    /// 3874), so everything the daemon ever sends to the old receiver precedes
+    /// the new receiver's first event:
+    ///
+    /// 1. drain `retiring` (this also unblocks a daemon thread waiting on a
+    ///    full old channel);
+    /// 2. if the new receiver is still empty, the daemon has not run the
+    ///    browse command and the old receiver is still the live listener:
+    ///    keep it and stop;
+    /// 3. otherwise the new receiver's first event — of any kind — is the
+    ///    switch point: drain `retiring` once more (for what the daemon sent
+    ///    after step 1 read it), drop it, then apply that event and the rest
+    ///    of the new receiver. A first event other than `SearchStarted` is
+    ///    traced, so a future mdns-sd reordering is visible.
+    ///
+    /// So a stale `ServiceRemoved` on the old receiver is always applied
+    /// before a genuine `ServiceFound` on the new one and can never erase it.
+    fn drain(&mut self, service_type: &str) {
+        #[cfg(test)]
+        let injected = std::mem::take(&mut self.injected);
+        let Self {
+            receiver,
+            retiring,
+            pending,
+            surfaced,
+            found,
+            present,
+            ..
+        } = self;
+        let mut apply = |event: ServiceEvent| {
+            fan_out_event(service_type, pending, surfaced, found, present, event);
+        };
+        // Whether `receiver` is (now) the daemon's live listener for the type.
+        let mut switched = true;
+        if let Some(old) = retiring.as_ref() {
+            // 1. Everything the daemon has sent the old listener so far.
+            while let Some(event) = old.try_next() {
+                apply(event);
+            }
+            if let Some(first) = receiver.try_next() {
+                // 3. The switch point. Nothing reaches the old receiver after
+                //    this event was sent, but some may have since step 1.
+                while let Some(event) = old.try_next() {
+                    apply(event);
+                }
+                if !matches!(first, ServiceEvent::SearchStarted(_)) {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        browse = service_type,
+                        first = ?first,
+                        "mDNS requery: the new receiver's first event is not SearchStarted; \
+                         switching over on it anyway",
+                    );
+                }
+                apply(first);
+            } else {
+                // 2. The daemon has not run the browse command yet.
+                switched = false;
+            }
+        }
+        if switched {
+            *retiring = None;
+            while let Some(event) = receiver.try_next() {
+                apply(event);
+            }
+        }
+        #[cfg(test)]
+        for event in injected {
+            apply(event);
+        }
+    }
 }
 
 /// Default mDNS discovery adapter for Matter, backed by `mdns-sd`.
@@ -358,15 +531,7 @@ impl MdnsSdDiscovery {
         if let Some(receiver) = receiver {
             self.browses.insert(
                 service_type.clone(),
-                BrowseState {
-                    receiver,
-                    pending: HashMap::new(),
-                    surfaced: HashMap::new(),
-                    found: HashMap::new(),
-                    present: HashSet::new(),
-                    #[cfg(test)]
-                    injected: Vec::new(),
-                },
+                BrowseState::new(EventSource::Daemon(receiver)),
             );
         }
         let handle = self.allocate_handle();
@@ -448,31 +613,17 @@ impl MdnsSdDiscovery {
 
     /// Drain every event the daemon has queued for `service_type`'s browse and
     /// fan each out to every attached handle: resolved records into `pending`
-    /// (and `surfaced`), found events into `found`.
+    /// (and `surfaced`), found events into `found` — including a requery's
+    /// switch-over from its retiring receiver (`BrowseState::drain`).
     ///
     /// Both [`Discovery::poll_results`] and [`Discovery::poll_found`] call this
     /// first. Whichever runs first drains for both, so the order of the two
-    /// calls never matters and neither can starve the other of events.
+    /// calls never matters and neither can starve the other of events. Calling
+    /// it from both in one pass is safe mid-requery too: the switch-over state
+    /// lives in the browse, not in the call.
     fn drain_events(&mut self, service_type: &str) {
-        let Some(browse) = self.browses.get_mut(service_type) else {
-            return;
-        };
-        #[cfg(test)]
-        let injected = std::mem::take(&mut browse.injected);
-        let BrowseState {
-            receiver,
-            pending,
-            surfaced,
-            found,
-            present,
-            ..
-        } = browse;
-        while let Ok(event) = receiver.try_recv() {
-            fan_out_event(service_type, pending, surfaced, found, present, event);
-        }
-        #[cfg(test)]
-        for event in injected {
-            fan_out_event(service_type, pending, surfaced, found, present, event);
+        if let Some(browse) = self.browses.get_mut(service_type) {
+            browse.drain(service_type);
         }
     }
 }
@@ -636,6 +787,13 @@ impl Discovery for MdnsSdDiscovery {
     /// not receive it (found events are not replayed, unlike resolved records).
     /// Each handle buffers at most `FOUND_BUFFER_CAP` (256) names, oldest
     /// dropped, so a handle whose owner never calls this costs bounded memory.
+    ///
+    /// One imprecision is accepted (spec 2026-10-04, review S1): mdns-sd also
+    /// sends `ServiceRemoved` when an instance's SRV or address records expire
+    /// while its PTR is still cached, so the next [`Discovery::requery`]
+    /// replays that PTR and it is reported once more. For the controller that
+    /// is at most one spurious advert pull per outage, bounded by its 30 s
+    /// cooldown, in the safe direction.
     fn poll_found(&mut self, handle: QueryHandle) -> Vec<String> {
         let Some(service_type) = self.handle_types.get(&handle).cloned() else {
             return Vec::new();
@@ -646,6 +804,76 @@ impl Discovery for MdnsSdDiscovery {
             .and_then(|browse| browse.found.get_mut(&handle))
             .map(std::mem::take)
             .unwrap_or_default()
+    }
+
+    /// Re-issue this handle's browse with `daemon.browse`, so mdns-sd sends a
+    /// fresh PTR query now instead of at the next step of its own doubling
+    /// schedule (which reaches an hour). The browse is shared by every handle
+    /// of its service type, so this re-queries for all of them; their buffers
+    /// are untouched.
+    ///
+    /// # The swap loses nothing
+    ///
+    /// `daemon.browse` only queues a command: until the daemon thread runs it,
+    /// the querier still sends to the current receiver. That receiver is
+    /// therefore kept (retiring) and drained ahead of anything the new one
+    /// delivers, until the new one's first event (see the module docs). A
+    /// requery while such a switch-over is still pending, or for an unknown or
+    /// stopped handle, does nothing; if the daemon refuses the browse, nothing
+    /// changes either (logged at `debug`). The old query chain stops by itself
+    /// at its next retransmission, once its receiver is gone.
+    ///
+    /// # What it costs
+    ///
+    /// mdns-sd replays every cached PTR of the type as `ServiceFound` plus
+    /// `ServiceResolved`. Found replays of instances already present are not
+    /// reported ([`Discovery::poll_found`]); resolved replays are re-delivered
+    /// to every handle by [`Discovery::poll_results`] (latest wins). The
+    /// replay is up to `1 + 2N` events into mdns-sd's 10-slot channel, so with
+    /// five or more instances the daemon thread waits for the next drain. The
+    /// restarted query chain sends about five small multicast PTR queries over
+    /// the next ~15 s, each carrying known answers (so devices whose PTR the
+    /// daemon holds stay silent), and re-arms up to three ANY queries for any
+    /// instance cached but not yet resolved.
+    fn requery(&mut self, handle: QueryHandle) {
+        let Some(service_type) = self.handle_types.get(&handle) else {
+            return;
+        };
+        let Some(browse) = self.browses.get_mut(service_type) else {
+            return;
+        };
+        if browse.retiring.is_some() {
+            tracing::debug!(
+                target: LOG_TARGET,
+                service_type = %service_type,
+                "mDNS requery skipped: the previous one has not switched over yet",
+            );
+            return;
+        }
+        match self.daemon.browse(service_type) {
+            Ok(receiver) => {
+                browse.begin_requery(EventSource::Daemon(receiver));
+                #[cfg(test)]
+                self.browse_calls
+                    .entry(service_type.clone())
+                    .and_modify(|n| *n += 1)
+                    .or_insert(1);
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    service_type = %service_type,
+                    handles = browse.pending.len(),
+                    "mDNS requery: browse re-issued",
+                );
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    service_type = %service_type,
+                    error = %e,
+                    "mDNS requery failed; the browse continues unchanged",
+                );
+            }
+        }
     }
 }
 
@@ -1885,5 +2113,290 @@ mod tests {
             "the lower-case spelling is its own entry"
         );
         d.stop_query(h);
+    }
+
+    // ---------------------------------------------------------------------
+    // Requery: the lossless receiver swap (spec 2026-10-04 §3.1, review B1).
+    //
+    // The switch-over is driven on a `BrowseState` fed by scripted channels
+    // (`EventSource::Scripted`), so a test decides exactly what the "daemon"
+    // has sent to which receiver before each drain. `requery` itself, which
+    // calls the real daemon, is tested on `MdnsSdDiscovery` below.
+    // ---------------------------------------------------------------------
+
+    /// The sending end of a scripted receiver: `Some(event)` is an event the
+    /// daemon sent, `None` a gap (the read that takes it sees an empty
+    /// channel).
+    type Script = std::sync::mpsc::Sender<Option<ServiceEvent>>;
+
+    /// A subtype browse fed by a scripted receiver instead of the daemon, with
+    /// one attached handle. Returns the browse, its script, and the handle.
+    fn scripted_browse() -> (BrowseState, Script, QueryHandle) {
+        let (script, receiver) = std::sync::mpsc::channel();
+        let mut browse = BrowseState::new(EventSource::Scripted(receiver));
+        let h = QueryHandle(1);
+        browse.pending.insert(h, Vec::new());
+        browse.found.insert(h, Vec::new());
+        (browse, script, h)
+    }
+
+    /// Start a requery's switch-over on `browse` with a fresh scripted
+    /// receiver, exactly as `requery` does with the daemon's; returns its
+    /// script.
+    fn begin_scripted_requery(browse: &mut BrowseState) -> Script {
+        let (script, receiver) = std::sync::mpsc::channel();
+        browse.begin_requery(EventSource::Scripted(receiver));
+        script
+    }
+
+    /// `h`'s found events since the last call, as `poll_found` takes them.
+    fn take_found(browse: &mut BrowseState, h: QueryHandle) -> Vec<String> {
+        browse
+            .found
+            .get_mut(&h)
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// The first event mdns-sd sends on a new browse listener.
+    fn search_started() -> ServiceEvent {
+        ServiceEvent::SearchStarted(TEST_SUBTYPE.to_string())
+    }
+
+    /// Spec 2026-10-04 test 4: what the old receiver holds is applied before
+    /// anything after the new receiver's `SearchStarted`. The device left (its
+    /// PTR expired: `ServiceRemoved` to the old listener) and was back by the
+    /// time the daemon ran the browse (a genuine `ServiceFound` on the new
+    /// one): the return must be reported, not suppressed as a replay.
+    #[test]
+    fn requery_applies_the_retiring_receiver_before_the_new_one() {
+        let fullname = "requery-a._matter._tcp.local.";
+        let (mut browse, to_old, h) = scripted_browse();
+        to_old
+            .send(Some(found_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert_eq!(take_found(&mut browse, h), vec!["requery-a".to_string()]);
+
+        let to_new = begin_scripted_requery(&mut browse);
+        to_old
+            .send(Some(removed_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        to_new.send(Some(search_started())).unwrap();
+        to_new
+            .send(Some(found_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert_eq!(
+            take_found(&mut browse, h),
+            vec!["requery-a".to_string()],
+            "the removal on the old receiver is applied first, so the return is reported"
+        );
+        assert!(browse.retiring.is_none(), "switched over at SearchStarted");
+        assert!(
+            to_old.send(None).is_err(),
+            "and the old receiver is dropped"
+        );
+    }
+
+    /// Review Focus 1: the daemon sends a removal to the old listener AFTER
+    /// step 1 of a drain read it empty, then runs the browse command before
+    /// step 2 reads the new receiver. Step 3 drains the old receiver once more
+    /// at the switch point; without it the removal is dropped with the old
+    /// receiver and the instance's genuine return is suppressed for good.
+    #[test]
+    fn requery_keeps_a_removal_sent_just_before_the_switch() {
+        let fullname = "requery-race._matter._tcp.local.";
+        let (mut browse, to_old, h) = scripted_browse();
+        to_old
+            .send(Some(found_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert_eq!(take_found(&mut browse, h), vec!["requery-race".to_string()]);
+
+        let to_new = begin_scripted_requery(&mut browse);
+        // Step 1 of the next drain reads the old receiver empty (the gap)...
+        to_old.send(None).unwrap();
+        // ... then the daemon sends the removal there and runs the browse.
+        to_old
+            .send(Some(removed_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        to_new.send(Some(search_started())).unwrap();
+        to_new
+            .send(Some(found_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert_eq!(
+            take_found(&mut browse, h),
+            vec!["requery-race".to_string()],
+            "the old receiver is drained once more at the switch point"
+        );
+    }
+
+    /// Spec 2026-10-04 test 4: while the new receiver is empty the daemon has
+    /// not run the browse command, so the old receiver is still the live
+    /// listener: it is kept and drained, and a removal it carries then is
+    /// applied, not lost. It is dropped once the new receiver's
+    /// `SearchStarted` arrives, and the instance's later return is reported.
+    #[test]
+    fn requery_keeps_the_old_receiver_until_the_new_one_speaks() {
+        let fullname = "requery-kept._matter._tcp.local.";
+        let (mut browse, to_old, h) = scripted_browse();
+        to_old
+            .send(Some(found_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert_eq!(take_found(&mut browse, h), vec!["requery-kept".to_string()]);
+
+        let to_new = begin_scripted_requery(&mut browse);
+        browse.drain(TEST_SUBTYPE);
+        assert!(
+            browse.retiring.is_some(),
+            "the new receiver is empty: the old one is still the live listener"
+        );
+
+        // Sent to the old listener after that drain, before the daemon runs
+        // the browse command.
+        to_old
+            .send(Some(removed_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert!(
+            !browse.present.contains("requery-kept"),
+            "the removal is applied, not lost"
+        );
+        assert!(browse.retiring.is_some());
+
+        to_new.send(Some(search_started())).unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert!(browse.retiring.is_none(), "dropped at SearchStarted");
+        assert!(to_old.send(None).is_err());
+
+        to_new
+            .send(Some(found_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert_eq!(
+            take_found(&mut browse, h),
+            vec!["requery-kept".to_string()],
+            "its later genuine return is reported"
+        );
+    }
+
+    /// The switch point is the new receiver's first event of ANY kind (a
+    /// future mdns-sd that sent something before `SearchStarted` is traced,
+    /// not waited on forever), and that event is applied, not swallowed as a
+    /// marker.
+    #[test]
+    fn requery_switches_on_a_first_event_other_than_search_started() {
+        let (mut browse, to_old, h) = scripted_browse();
+        let to_new = begin_scripted_requery(&mut browse);
+        to_new
+            .send(Some(found_event(
+                TEST_SUBTYPE,
+                "requery-first._matter._tcp.local.",
+            )))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert!(browse.retiring.is_none());
+        assert!(to_old.send(None).is_err());
+        assert_eq!(
+            take_found(&mut browse, h),
+            vec!["requery-first".to_string()],
+            "the first event is applied"
+        );
+    }
+
+    /// Spec 2026-10-04 test 3 (review S1, accepted and pinned): mdns-sd also
+    /// reports `ServiceRemoved` when only an instance's SRV/addresses expire
+    /// while its PTR stays cached. The next requery replays that PTR, and it
+    /// is reported as found once — and only once: the requery after that
+    /// replays it again, suppressed.
+    #[test]
+    fn requery_after_an_srv_expiry_reports_the_instance_once() {
+        let fullname = "requery-s1._matter._tcp.local.";
+        let (mut browse, to_old, h) = scripted_browse();
+        to_old
+            .send(Some(found_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert_eq!(take_found(&mut browse, h), vec!["requery-s1".to_string()]);
+        to_old
+            .send(Some(removed_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert_eq!(take_found(&mut browse, h), Vec::<String>::new());
+
+        let to_first = begin_scripted_requery(&mut browse);
+        to_first.send(Some(search_started())).unwrap();
+        to_first
+            .send(Some(found_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert_eq!(
+            take_found(&mut browse, h),
+            vec!["requery-s1".to_string()],
+            "the accepted imprecision: reported once"
+        );
+
+        let to_second = begin_scripted_requery(&mut browse);
+        to_second.send(Some(search_started())).unwrap();
+        to_second
+            .send(Some(found_event(TEST_SUBTYPE, fullname)))
+            .unwrap();
+        browse.drain(TEST_SUBTYPE);
+        assert_eq!(
+            take_found(&mut browse, h),
+            Vec::<String>::new(),
+            "and only once"
+        );
+    }
+
+    /// Spec 2026-10-04 test 4 / Review Focus 2: a requery while a swap is
+    /// still pending (no drain has seen the new receiver's first event) is a
+    /// no-op — a second `browse` would retire the not-yet-live receiver and
+    /// drop the live one. Per-handle buffers survive the swap untouched.
+    #[test]
+    fn requery_while_a_switch_is_pending_is_a_no_op() {
+        let mut d = MdnsSdDiscovery::new().unwrap();
+        let h = d.query_operational_fabric(TEST_CFID).unwrap();
+        d.deliver_for_type_for_test(
+            TEST_SUBTYPE,
+            found_event(TEST_SUBTYPE, "requery-kept-buffer._matter._tcp.local."),
+        );
+        d.requery(h);
+        assert_eq!(d.browse_calls.get(TEST_SUBTYPE), Some(&2), "re-browsed");
+        assert!(d.browses[TEST_SUBTYPE].retiring.is_some());
+        d.requery(h);
+        assert_eq!(
+            d.browse_calls.get(TEST_SUBTYPE),
+            Some(&2),
+            "a second requery before the switch-over must not browse again"
+        );
+        assert!(
+            names(&d.poll_found(h), "requery-kept-buffer"),
+            "the handle's buffer is untouched by the swap"
+        );
+        d.stop_query(h);
+        assert_eq!(d.stop_browse_calls.get(TEST_SUBTYPE), Some(&1));
+        assert_eq!(d.browses.len(), 0);
+    }
+
+    /// Spec 2026-10-04 test 6: `requery` on an unknown or stopped handle does
+    /// nothing (no browse is opened or re-opened).
+    #[test]
+    fn requery_on_an_unknown_or_stopped_handle_is_a_no_op() {
+        let mut d = MdnsSdDiscovery::new().unwrap();
+        d.requery(QueryHandle(999));
+        assert_eq!(d.browse_calls.get(TEST_SUBTYPE), None);
+        let h = d.query_operational_fabric(TEST_CFID).unwrap();
+        d.stop_query(h);
+        d.requery(h);
+        assert_eq!(
+            d.browse_calls.get(TEST_SUBTYPE),
+            Some(&1),
+            "only the original browse"
+        );
+        assert_eq!(d.browses.len(), 0);
     }
 }
