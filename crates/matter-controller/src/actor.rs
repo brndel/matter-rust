@@ -439,6 +439,36 @@ const ADVERT_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_secs(
 #[cfg(test)]
 const ADVERT_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long after the resubscribe watch starts holding the subtype browse it
+/// first re-queries it, and the first step of its re-query cadence
+/// ([`Actor::drive_watch_requery`], spec 2026-10-04).
+///
+/// mdns-sd accepts a response only if it answers one of its active queriers,
+/// and re-sends a browse's query on a doubling schedule capped at an hour. A
+/// device whose announcement the subtype querier did not take is otherwise
+/// seen only at that next scheduled query — up to an hour late (`WeaveHome`
+/// field report on 0.16). A fresh query carries known answers, so devices
+/// whose PTR the daemon holds stay silent, and a returning device answers with
+/// a new PTR: exactly the advert the watch acts on.
+#[cfg(not(test))]
+const ADVERT_REQUERY_FIRST: std::time::Duration = std::time::Duration::from_secs(30);
+/// Shortened under `cfg(test)`, keeping production's 1 : 10 ratio to
+/// [`ADVERT_REQUERY_MAX`], so the in-crate end-to-end test recovers in
+/// seconds; unit tests use the constant, never a literal.
+#[cfg(test)]
+const ADVERT_REQUERY_FIRST: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The re-query cadence doubles from [`ADVERT_REQUERY_FIRST`] up to this cap:
+/// 30, 60, 120, 240 s apart, then every 300 s (maintainer decision,
+/// 2026-10-04). RFC 6762 §5.2 asks continuous queries to back off; 5 min bounds
+/// the controller's own detection of a long outage, and an application's own
+/// browse calling `resubscribe_now` stays the fast path.
+#[cfg(not(test))]
+const ADVERT_REQUERY_MAX: std::time::Duration = std::time::Duration::from_secs(300);
+/// Shortened under `cfg(test)` with [`ADVERT_REQUERY_FIRST`].
+#[cfg(test)]
+const ADVERT_REQUERY_MAX: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// chip `GetFibonacciForIndex` (F(0)=0, F(1)=1, F(2)=1, F(3)=2, …).
 fn fibonacci(n: u32) -> u64 {
     let (mut a, mut b) = (0u64, 1u64);
@@ -1450,7 +1480,8 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     /// device, or a transport whose `recv_from` returns errors back-to-back)
     /// would otherwise push a relative tick forward forever and starve
     /// discovery. Advanced by [`Self::drive_pending_resolves`], which picks the
-    /// interval: [`RESOLVE_POLL_INTERVAL`] while a resolve is parked,
+    /// interval: [`RESOLVE_POLL_INTERVAL`] while a resolve is parked, and once
+    /// right after a watch re-query (`drain_soon`);
     /// [`ADVERT_WATCH_POLL_INTERVAL`] while only the resubscribe watch holds the
     /// subtype browse. Consulted only in those two states.
     next_resolve_poll: Instant,
@@ -1539,6 +1570,30 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     /// discarded ([`ADVERT_QUIET_WINDOW`]); set at every subtype open, by
     /// whichever opener, and cleared when it closes.
     advert_quiet_until: Option<Instant>,
+    /// When the resubscribe watch next re-queries the subtype browse
+    /// ([`Self::drive_watch_requery`]). `None` while the watch has no schedule:
+    /// no browse held, no subscription waiting, or a handle `spawn_connect`
+    /// opened that the watch has not adopted yet. Cleared by
+    /// [`Self::close_subtype_browse`] and whenever no subscription waits (even
+    /// if a parked resolve keeps the browse), so every episode starts at
+    /// [`ADVERT_REQUERY_FIRST`].
+    watch_requery_at: Option<Instant>,
+    /// The cadence step `watch_requery_at` was scheduled with; the next step is
+    /// double this, capped at [`ADVERT_REQUERY_MAX`].
+    watch_requery_interval: Duration,
+    /// The nodes in a resubscribe episode at the previous cadence step, sorted
+    /// and deduplicated ([`Self::resubscribe_episode_nodes`]). A node missing
+    /// from it has just been lost, and restarts the cadence at its first step.
+    watch_episode_nodes: Vec<u64>,
+    /// Set by a watch re-query so the next [`Self::drive_pending_resolves`]
+    /// re-arms the drain tick at [`RESOLVE_POLL_INTERVAL`] instead of
+    /// [`ADVERT_WATCH_POLL_INTERVAL`], and cleared by it. mdns-sd replays its
+    /// cache for the re-issued browse into a 10-slot channel and its thread
+    /// waits while that is full, so the replay is drained early, once. A flag
+    /// rather than an earlier `next_resolve_poll`: reconcile runs just before
+    /// `drive_pending_resolves`, which re-arms the tick first thing and would
+    /// overwrite it in the same pass.
+    drain_soon: bool,
     /// Operational records drained from that browse, keyed by ASCII-lowercased
     /// instance name. A drain consumes what it returns, so every record is
     /// cached — not just the ones a resolve is parked for right now — or a
@@ -2177,6 +2232,10 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             resolve_query_fabric_cfid: None,
             watch_open_retry_at: None,
             advert_quiet_until: None,
+            watch_requery_at: None,
+            watch_requery_interval: ADVERT_REQUERY_FIRST,
+            watch_episode_nodes: Vec::new(),
+            drain_soon: false,
             seen_records: HashMap::new(),
             multicast_if: None,
             group_counters: HashMap::new(),
@@ -4027,9 +4086,13 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// injected `Discovery` that keeps the trait default for
     /// `query_operational_fabric` returns one handle for both): the base
     /// release stops it then, once.
+    ///
+    /// Also drops the watch's re-query schedule: every close path goes through
+    /// here, so a reopened watch always starts at [`ADVERT_REQUERY_FIRST`].
     fn close_subtype_browse(&mut self) {
         self.resolve_query_fabric_cfid = None;
         self.advert_quiet_until = None;
+        self.watch_requery_at = None;
         if let Some(handle) = self.resolve_query_fabric.take() {
             if self.resolve_query != Some(handle) {
                 self.discovery.stop_query(handle);
@@ -4478,6 +4541,11 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     ///   browse is live (a subtype browse beside a live base one recreates the
     ///   #113 starvation), there is a sole fabric, and no failed open is waiting
     ///   out [`WATCH_OPEN_RETRY`].
+    /// - **Re-query** the held browse on its cadence while an episode needs it
+    ///   ([`Self::drive_watch_requery`]), after the fabric check above. Its
+    ///   schedule is dropped whenever no episode needs the watch, even while a
+    ///   parked resolve keeps the browse, and a browse opened here gets one at
+    ///   once.
     ///
     /// Opens go through [`Self::open_subtype_browse`], the same helper
     /// `spawn_connect` uses, so a browse a connect opened is recognised here
@@ -4496,15 +4564,26 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     );
                     self.close_subtype_browse();
                 }
+                // A stale `watch_requery_at` left here is harmless: no
+                // re-query runs on this path, and `close_subtype_browse`
+                // clears it before any reopen.
                 return;
             }
-            if !needed && !parked {
-                tracing::debug!(
-                    target: "matter_controller::actor",
-                    "resubscribe watch: no subscription is waiting; closing the subtype browse",
-                );
-                self.close_subtype_browse();
+            if !needed {
+                // The episode is over. A parked resolve may still hold the
+                // browse, but the watch's schedule goes now, so the next
+                // episode starts at the first step.
+                self.watch_requery_at = None;
+                if !parked {
+                    tracing::debug!(
+                        target: "matter_controller::actor",
+                        "resubscribe watch: no subscription is waiting; closing the subtype browse",
+                    );
+                    self.close_subtype_browse();
+                }
+                return;
             }
+            self.drive_watch_requery(now);
             return;
         }
         if !needed
@@ -4530,6 +4609,8 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                     subtype = %matter_transport::operational_fabric_subtype(cfid),
                     "resubscribe watch: subtype browse opened",
                 );
+                // Adopts the new handle: the first re-query is one step out.
+                self.drive_watch_requery(now);
             }
             Err(e) => {
                 self.watch_open_retry_at = Some(now + WATCH_OPEN_RETRY);
@@ -4541,6 +4622,78 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
                 );
             }
         }
+    }
+
+    /// The resubscribe watch's re-query cadence (spec 2026-10-04 §3.2), run by
+    /// [`Self::reconcile_resubscribe_watch`] while an episode needs the watch
+    /// and the subtype browse is held for the sole fabric.
+    ///
+    /// - **Adopt:** a held handle with no schedule (just opened by the watch,
+    ///   or opened by `spawn_connect`) gets its first re-query
+    ///   [`ADVERT_REQUERY_FIRST`] from now.
+    /// - **Reset:** a node that was not in an episode at the previous step has
+    ///   just been lost, so the cadence restarts at its first step — never
+    ///   later than a re-query already scheduled. Every newly lost node gets
+    ///   the 30 s → 5 min sequence whatever other nodes already wait; this is
+    ///   bounded because episodes begin only at liveness timeouts.
+    /// - **Re-query** once due, unless the base-type fallback browse is live:
+    ///   a resolve is already driving queries then, and acting on the subtype
+    ///   beside a live base browse is what #113 forbids. (That also covers a
+    ///   `Discovery` handing out one handle for both browses: equal handles
+    ///   mean the base one is live.) A skipped re-query stays due and goes out
+    ///   on the first pass after the base browse closes. The interval then
+    ///   doubles up to [`ADVERT_REQUERY_MAX`], and `drain_soon` pulls the next
+    ///   drain in.
+    ///
+    /// No quiet window follows a re-query: the adapter's `poll_found` does not
+    /// re-report an instance it already reported, so the daemon's replay is
+    /// not mistaken for adverts. No timer source is added either: while the
+    /// handle is held, the drain tick (at most 1 s) is in
+    /// [`Self::next_timer_deadline`] and reconcile runs on every timer pass, so
+    /// a re-query goes out at most about a second late.
+    fn drive_watch_requery(&mut self, now: Instant) {
+        let Some(handle) = self.resolve_query_fabric else {
+            return;
+        };
+        let nodes = self.resubscribe_episode_nodes();
+        let joined = nodes
+            .iter()
+            .any(|node| self.watch_episode_nodes.binary_search(node).is_err());
+        self.watch_episode_nodes = nodes;
+        let Some(scheduled) = self.watch_requery_at else {
+            self.watch_requery_interval = ADVERT_REQUERY_FIRST;
+            self.watch_requery_at = Some(now + ADVERT_REQUERY_FIRST);
+            return;
+        };
+        let due = if joined {
+            let reset = scheduled.min(now + ADVERT_REQUERY_FIRST);
+            self.watch_requery_interval = ADVERT_REQUERY_FIRST;
+            self.watch_requery_at = Some(reset);
+            tracing::debug!(
+                target: "matter_controller::actor",
+                waiting_nodes = self.watch_episode_nodes.len(),
+                "resubscribe watch: a node joined; re-query cadence restarted",
+            );
+            reset
+        } else {
+            scheduled
+        };
+        if self.resolve_query.is_some() || now < due {
+            return;
+        }
+        self.discovery.requery(handle);
+        self.watch_requery_interval = self
+            .watch_requery_interval
+            .saturating_mul(2)
+            .min(ADVERT_REQUERY_MAX);
+        self.watch_requery_at = Some(now + self.watch_requery_interval);
+        self.drain_soon = true;
+        tracing::debug!(
+            target: "matter_controller::actor",
+            waiting_nodes = self.watch_episode_nodes.len(),
+            next_in = ?self.watch_requery_interval,
+            "resubscribe watch: re-queried the subtype browse",
+        );
     }
 
     /// Drop any parked resolve for `node_id` (it has been resolved, failed, or
@@ -4613,7 +4766,9 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// from [`Self::spawn_connect`] so an already-known record connects at once.
     /// Returns immediately when nothing is parked and the resubscribe watch
     /// holds no browse — an idle controller pays nothing. With only the watch
-    /// held it drains the subtype browse every [`ADVERT_WATCH_POLL_INTERVAL`].
+    /// held it drains the subtype browse every [`ADVERT_WATCH_POLL_INTERVAL`],
+    /// except right after a watch re-query (`drain_soon`), when the next drain
+    /// is [`RESOLVE_POLL_INTERVAL`] away, once.
     fn drive_pending_resolves(&mut self) {
         // Re-arm the polling tick FIRST, before any early return: the loop only
         // consults it while entries are parked or the resubscribe watch holds
@@ -4621,11 +4776,14 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
         // leave a due-in-the-past anchor behind that would spin the fairness
         // guard. A parked resolve is polled briskly; the watch alone, which only
         // waits for a device to re-announce, at the slower cadence.
-        let interval = if self.pending_resolves.is_empty() {
+        // Right after a watch re-query the daemon is replaying its cache into
+        // a small channel; drain it early, once (`drain_soon`).
+        let interval = if self.pending_resolves.is_empty() && !self.drain_soon {
             ADVERT_WATCH_POLL_INTERVAL
         } else {
             RESOLVE_POLL_INTERVAL
         };
+        self.drain_soon = false;
         self.next_resolve_poll = Instant::now() + interval;
         if self.pending_resolves.is_empty() && self.resolve_query_fabric.is_none() {
             return;
@@ -19642,6 +19800,8 @@ mod tests {
         stops: Vec<QueryHandle>,
         /// Every `poll_found` call, in order.
         found_polls: Vec<QueryHandle>,
+        /// Every `requery` call, in order.
+        requeries: Vec<QueryHandle>,
         /// Return the base handle from `query_operational_fabric` too, as a
         /// `Discovery` that keeps the trait default does.
         equal_handles: bool,
@@ -19751,6 +19911,9 @@ mod tests {
             } else {
                 Vec::new()
             }
+        }
+        fn requery(&mut self, h: QueryHandle) {
+            self.0.lock().unwrap().requeries.push(h);
         }
     }
 
@@ -23768,5 +23931,305 @@ mod tests {
         }
         assert!(started.elapsed() < Duration::from_secs(10));
         let _ = tokio::time::timeout(Duration::from_secs(5), device).await;
+    }
+
+    // --- watch re-query cadence (spec 2026-10-04) ---
+
+    /// Spec 2026-10-04 test 7: while the watch holds the subtype browse it is
+    /// re-queried one step after the watch starts, then on an interval that
+    /// doubles up to the cap — 30, 90, 210, 450 s, then every 300 s in
+    /// production — and never before the first step. Driven with a synthetic
+    /// `now` on a grid of half steps, so an early or late re-query shows.
+    #[tokio::test]
+    async fn the_watch_requeries_on_a_capped_doubling_cadence() {
+        assert_eq!(
+            ADVERT_REQUERY_MAX,
+            ADVERT_REQUERY_FIRST * 10,
+            "the grid below assumes production's 30 s : 300 s shape"
+        );
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        let t0 = Instant::now();
+        actor.reconcile_resubscribe_watch(t0);
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+        let half_step = ADVERT_REQUERY_FIRST / 2;
+        let mut fired = Vec::new();
+        for k in 1..=70u32 {
+            let before = state.lock().unwrap().requeries.len();
+            actor.reconcile_resubscribe_watch(t0 + half_step * k);
+            if state.lock().unwrap().requeries.len() > before {
+                fired.push(k);
+            }
+        }
+        // In half steps: after 1, 3, 7 and 15 steps, then every 10 (the cap).
+        assert_eq!(fired, vec![2, 6, 14, 30, 50, 70]);
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.requeries,
+            vec![WATCH_SUBTYPE_HANDLE; 6],
+            "only the subtype handle is re-queried"
+        );
+        assert_eq!(s.subtype_opens, 1, "a re-query is not a reopen");
+        assert_eq!(s.stops, Vec::<QueryHandle>::new());
+    }
+
+    /// Spec 2026-10-04 test 8: no re-query while the base-type fallback browse
+    /// is live (a resolve is already driving queries, and #113 forbids acting
+    /// on the subtype beside it); re-querying resumes once it closes.
+    #[tokio::test]
+    async fn the_watch_never_requeries_beside_a_live_base_browse() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let (queued, _queued_reports, _queued_ctrl) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(queued);
+        let t0 = Instant::now();
+        actor.reconcile_resubscribe_watch(t0);
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_SUBTYPE_HANDLE));
+        // B's connect parks on the held subtype browse; its base fallback opens.
+        let (connecting, _connecting_reports, _connecting_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(
+            fabric_id,
+            WATCH_NODE_B,
+            ConnectWaiter::Resubscribe(connecting),
+        );
+        actor.resolve_base_after = Some(just_past());
+        actor.drive_pending_resolves();
+        assert_eq!(actor.resolve_query, Some(WATCH_BASE_HANDLE));
+
+        actor.reconcile_resubscribe_watch(t0 + ADVERT_REQUERY_FIRST * 4);
+        assert_eq!(
+            state.lock().unwrap().requeries,
+            Vec::<QueryHandle>::new(),
+            "never beside a live base browse"
+        );
+
+        actor.cancel_pending_resolve(WATCH_NODE_B);
+        assert_eq!(actor.resolve_query, None);
+        actor.reconcile_resubscribe_watch(t0 + ADVERT_REQUERY_FIRST * 5);
+        assert_eq!(
+            state.lock().unwrap().requeries,
+            vec![WATCH_SUBTYPE_HANDLE],
+            "re-querying resumes once the base browse is gone"
+        );
+    }
+
+    /// Spec 2026-10-04 test 8, equal handles: a `Discovery` that keeps the
+    /// trait default for `query_operational_fabric` hands back one handle for
+    /// both browses. While the base browse holds it too, it is not
+    /// re-queried. Once the base browse lets go, the watch's rule applies to
+    /// the handle it still holds — a base-type browse, re-queried on the
+    /// cadence (maintainer ruling 2026-10-04: accepted and documented on
+    /// `resubscribe_now`; such a `Discovery` normally keeps the no-op default
+    /// `requery`).
+    #[tokio::test]
+    async fn a_shared_handle_is_not_requeried_while_the_base_browse_holds_it() {
+        let (discovery, state) = watch_discovery();
+        state.lock().unwrap().equal_handles = true;
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let (queued, _queued_reports, _queued_ctrl) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(queued);
+        let t0 = Instant::now();
+        actor.reconcile_resubscribe_watch(t0);
+        let (connecting, _connecting_reports, _connecting_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 0, Instant::now());
+        actor.enqueue_connect_waiter(
+            fabric_id,
+            WATCH_NODE_B,
+            ConnectWaiter::Resubscribe(connecting),
+        );
+        actor.resolve_base_after = Some(just_past());
+        actor.drive_pending_resolves();
+        assert_eq!(actor.resolve_query, Some(WATCH_BASE_HANDLE));
+        assert_eq!(actor.resolve_query_fabric, Some(WATCH_BASE_HANDLE));
+
+        actor.reconcile_resubscribe_watch(t0 + ADVERT_REQUERY_FIRST * 4);
+        assert_eq!(
+            state.lock().unwrap().requeries,
+            Vec::<QueryHandle>::new(),
+            "one handle serving both browses is not re-queried"
+        );
+
+        actor.cancel_pending_resolve(WATCH_NODE_B);
+        actor.reconcile_resubscribe_watch(t0 + ADVERT_REQUERY_FIRST * 5);
+        assert_eq!(
+            state.lock().unwrap().requeries,
+            vec![WATCH_BASE_HANDLE],
+            "released by the base side, the watch's handle is re-queried on the cadence"
+        );
+    }
+
+    /// Spec 2026-10-04 test 8: `close_subtype_browse` (every close path goes
+    /// through it) clears the schedule, so a reopened watch starts at the
+    /// first step instead of re-querying at once on a stale instant.
+    #[tokio::test]
+    async fn closing_the_subtype_browse_clears_the_requery_schedule() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        let t0 = Instant::now();
+        actor.reconcile_resubscribe_watch(t0);
+        assert_eq!(actor.watch_requery_at, Some(t0 + ADVERT_REQUERY_FIRST));
+
+        actor.close_subtype_browse();
+        assert_eq!(actor.watch_requery_at, None);
+
+        // Still waiting: the next pass reopens the watch on a fresh schedule.
+        let later = t0 + ADVERT_REQUERY_FIRST * 10;
+        actor.reconcile_resubscribe_watch(later);
+        {
+            let s = state.lock().unwrap();
+            assert_eq!(s.subtype_opens, 2, "reopened");
+            assert_eq!(
+                s.requeries,
+                Vec::<QueryHandle>::new(),
+                "a reopened watch is not re-queried at once"
+            );
+        }
+        assert_eq!(actor.watch_requery_at, Some(later + ADVERT_REQUERY_FIRST));
+    }
+
+    /// Spec 2026-10-04 test 9 / Review Focus 3: after a re-query and a full
+    /// drive pass (reconcile, then `drive_pending_resolves`, which re-arms the
+    /// tick first thing), the next drain is `RESOLVE_POLL_INTERVAL` away, not
+    /// the watch's 1 s; the flag is consumed, so the pass after is back on 1 s.
+    #[tokio::test]
+    async fn a_requery_pulls_the_next_drain_in_once() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        let t0 = Instant::now();
+        actor.reconcile_resubscribe_watch(t0);
+        assert!(!actor.drain_soon, "no re-query yet");
+
+        actor.reconcile_resubscribe_watch(t0 + ADVERT_REQUERY_FIRST);
+        assert_eq!(state.lock().unwrap().requeries, vec![WATCH_SUBTYPE_HANDLE]);
+        let before = Instant::now();
+        actor.drive_pending_resolves();
+        assert!(
+            actor.next_resolve_poll < before + ADVERT_WATCH_POLL_INTERVAL,
+            "the drain after a re-query comes early, not on the 1 s watch tick"
+        );
+        assert!(actor.next_resolve_poll >= before + RESOLVE_POLL_INTERVAL);
+        assert!(!actor.drain_soon, "consumed by that pass");
+
+        let before = Instant::now();
+        actor.drive_pending_resolves();
+        assert!(
+            actor.next_resolve_poll >= before + ADVERT_WATCH_POLL_INTERVAL,
+            "only once: the next pass is back on the watch tick"
+        );
+    }
+
+    /// Spec 2026-10-04 test 9b / Review Focus 4: once nothing waits, the
+    /// schedule goes even while a parked resolve keeps the subtype browse
+    /// open, so the next episode starts one full step out instead of
+    /// re-querying at once on a past-due instant.
+    #[tokio::test]
+    async fn the_requery_schedule_is_dropped_when_the_watch_is_not_needed() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let fabric_id = actor.sole_fabric().unwrap().fabric_id;
+        let cfid = actor.sole_compressed_fabric_id().unwrap();
+        let (first, first_reports, first_ctrl) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(first);
+        let t0 = Instant::now();
+        actor.reconcile_resubscribe_watch(t0);
+        assert_eq!(actor.watch_requery_at, Some(t0 + ADVERT_REQUERY_FIRST));
+
+        // A plain connect parks on the held browse; A's consumer goes, so no
+        // subscription waits any more.
+        actor.park_resolve(
+            fabric_id,
+            WATCH_NODE_B,
+            operational_instance_name(cfid, WATCH_NODE_B),
+        );
+        drop(first_reports);
+        drop(first_ctrl);
+        actor.reconcile_resubscribe_watch(t0 + ADVERT_REQUERY_FIRST * 2);
+        assert_eq!(
+            actor.resolve_query_fabric,
+            Some(WATCH_SUBTYPE_HANDLE),
+            "the parked resolve keeps the browse"
+        );
+        assert_eq!(
+            actor.watch_requery_at, None,
+            "but the watch's schedule goes"
+        );
+
+        // A new episode: its first re-query is one full step out.
+        let (second, _second_reports, _second_ctrl) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 4, far_future());
+        actor.resubscribes.push(second);
+        let t1 = t0 + ADVERT_REQUERY_FIRST * 3;
+        actor.reconcile_resubscribe_watch(t1);
+        assert_eq!(state.lock().unwrap().requeries, Vec::<QueryHandle>::new());
+        assert_eq!(actor.watch_requery_at, Some(t1 + ADVERT_REQUERY_FIRST));
+    }
+
+    /// Spec 2026-10-04 test 9b / Review Focus 5: a node newly entering an
+    /// episode restarts the cadence at its first step — so it gets the 30 s →
+    /// 5 min sequence whatever other nodes already wait — but never later than
+    /// a re-query already scheduled.
+    #[tokio::test]
+    async fn a_newly_lost_node_restarts_the_requery_cadence() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let step = ADVERT_REQUERY_FIRST;
+        let (pr_a, _reports_a, _ctrl_a) =
+            test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr_a);
+        let t0 = Instant::now();
+        actor.reconcile_resubscribe_watch(t0);
+        assert_eq!(actor.watch_requery_at, Some(t0 + step));
+
+        // B is lost half a step later: the sooner first re-query stands.
+        let (pr_b, _reports_b, _ctrl_b) =
+            test_pending_resubscribe(2, WATCH_NODE_B, 4, far_future());
+        actor.resubscribes.push(pr_b);
+        actor.reconcile_resubscribe_watch(t0 + step / 2);
+        assert_eq!(
+            actor.watch_requery_at,
+            Some(t0 + step),
+            "a reset never postpones"
+        );
+
+        // The cadence runs up to its cap: re-queries after 1, 3, 7, 15 steps.
+        for k in [1u32, 3, 7, 15] {
+            actor.reconcile_resubscribe_watch(t0 + step * k);
+        }
+        assert_eq!(state.lock().unwrap().requeries.len(), 4);
+        assert_eq!(actor.watch_requery_interval, ADVERT_REQUERY_MAX);
+        assert_eq!(
+            actor.watch_requery_at,
+            Some(t0 + step * 15 + ADVERT_REQUERY_MAX)
+        );
+
+        // A third node is lost a step later: one step out, not a whole cap.
+        let node_c = 0x0C_u64;
+        let (pr_c, _reports_c, _ctrl_c) = test_pending_resubscribe(3, node_c, 4, far_future());
+        actor.resubscribes.push(pr_c);
+        actor.reconcile_resubscribe_watch(t0 + step * 16);
+        assert_eq!(actor.watch_requery_at, Some(t0 + step * 17));
+        actor.reconcile_resubscribe_watch(t0 + step * 17);
+        assert_eq!(
+            state.lock().unwrap().requeries.len(),
+            5,
+            "re-queried one step after the node was lost"
+        );
+        assert_eq!(
+            actor.watch_requery_at,
+            Some(t0 + step * 19),
+            "and the cadence restarted: the next interval is two steps"
+        );
     }
 }

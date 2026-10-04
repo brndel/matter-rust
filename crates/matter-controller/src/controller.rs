@@ -780,8 +780,11 @@ impl MatterController {
     ///
     /// While a subscription waits, the controller watches its fabric's
     /// operational mDNS subtype and does this itself when the device publishes
-    /// a new advertisement. That covers most Wi-Fi and Ethernet devices. It
-    /// does **not** reliably cover:
+    /// a new advertisement. It also re-sends its query for that subtype 30 s
+    /// after the watch starts, then 60, 120 and 240 s apart, then every
+    /// 5 minutes, so a returning device whose announcement it missed is found
+    /// within about 5 minutes at worst. That covers most Wi-Fi and Ethernet
+    /// devices. It does **not** reliably cover:
     ///
     /// - Thread devices behind a border router whose SRP advertising proxy kept
     ///   serving their records while they were offline (no new advertisement
@@ -797,15 +800,23 @@ impl MatterController {
     ///   [`query_operational_fabric`](matter_transport::Discovery::query_operational_fabric)
     ///   and [`poll_found`](matter_transport::Discovery::poll_found). One that
     ///   overrides only `poll_found` may see spurious advert pulls, bounded by
-    ///   the 30 s per-subscription cooldown. The default `MdnsSdDiscovery`
-    ///   overrides both.
+    ///   the 30 s per-subscription cooldown. One that does not also override
+    ///   [`requery`](matter_transport::Discovery::requery) finds a device whose
+    ///   announcement was missed only when its resolver queries on its own.
+    ///   One that overrides `requery` but keeps the default
+    ///   `query_operational_fabric` has its base-type `_matter._tcp` browse
+    ///   re-queried on the cadence above.
+    ///   The default `MdnsSdDiscovery` overrides all three.
     ///
-    /// In those cases, call this from whatever signal you have.
+    /// In those cases, or to react faster than the re-query cadence, call this
+    /// from whatever signal you have.
     ///
     /// The watch has a steady-state cost: while any subscription is waiting
     /// (possibly indefinitely, for a device that never returns), the
-    /// controller holds one operational mDNS browse open and wakes about once
-    /// per second to drain it.
+    /// controller holds one operational mDNS browse open, wakes about once per
+    /// second to drain it, and re-queries it on the cadence above (each
+    /// re-query makes the mDNS daemon send a few small queries over about
+    /// 15 s and replay the records it holds for the fabric).
     ///
     /// Returns how many subscriptions it affected: scheduled retries pulled
     /// forward plus in-progress retries whose backoff it reset. `Ok(0)` means
