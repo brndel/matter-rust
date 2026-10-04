@@ -347,7 +347,10 @@ pub trait Discovery {
     /// consumers are unaffected), and [`Self::poll_found`] does not report an
     /// instance the browse already reported as found unless the resolver reported
     /// it removed in between. May restart the resolver's internal retry schedule.
-    /// The default does nothing, for a `Discovery` that cannot force a query.
+    /// Poll the handle promptly for a while afterwards: a resolver that replays
+    /// into a bounded channel, as `MdnsSdDiscovery`'s does, may stall until the
+    /// replay is drained. The default does nothing, for a `Discovery` that
+    /// cannot force a query.
     fn requery(&mut self, handle: QueryHandle) {
         // Unused on purpose: an implementation that cannot force a query has
         // nothing to do for any handle.

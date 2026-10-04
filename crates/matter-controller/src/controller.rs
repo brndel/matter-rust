@@ -783,8 +783,8 @@ impl MatterController {
     /// a new advertisement. It also re-sends its query for that subtype 30 s
     /// after the watch starts, then 60, 120 and 240 s apart, then every
     /// 5 minutes, so a returning device whose announcement it missed is found
-    /// within about 5 minutes at worst. That covers most Wi-Fi and Ethernet
-    /// devices. It does **not** reliably cover:
+    /// within about 5 minutes at worst (subject to the cases below). That
+    /// covers most Wi-Fi and Ethernet devices. It does **not** reliably cover:
     ///
     /// - Thread devices behind a border router whose SRP advertising proxy kept
     ///   serving their records while they were offline (no new advertisement
@@ -814,9 +814,18 @@ impl MatterController {
     /// The watch has a steady-state cost: while any subscription is waiting
     /// (possibly indefinitely, for a device that never returns), the
     /// controller holds one operational mDNS browse open, wakes about once per
-    /// second to drain it, and re-queries it on the cadence above (each
-    /// re-query makes the mDNS daemon send a few small queries over about
-    /// 15 s and replay the records it holds for the fabric).
+    /// second to drain it, and re-queries it on the cadence above. With the
+    /// default `MdnsSdDiscovery`, each re-query restarts the mDNS daemon's own
+    /// query sequence for the subtype
+    /// — about five small multicast queries in the first 15 s, and about nine
+    /// per 5-minute step at the cap, where a settled browse sends about one an
+    /// hour — and makes the daemon replay the records it holds for the fabric
+    /// (about two events per device) through a 10-event channel. The daemon's
+    /// thread, which does all of its mDNS work, stalls whenever that channel
+    /// is full until the controller drains it, so for 15 s after each
+    /// re-query the controller drains every 250 ms instead of every second:
+    /// the stall is well under a second for a 10-device fabric and a few
+    /// seconds for a very large one.
     ///
     /// Returns how many subscriptions it affected: scheduled retries pulled
     /// forward plus in-progress retries whose backoff it reset. `Ok(0)` means

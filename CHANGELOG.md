@@ -28,11 +28,11 @@ A subscription waiting for its device to come back no longer depends on the
 device's own announcement reaching the controller. While it waits, the
 controller now re-sends its mDNS query for the fabric's operational nodes on a
 backing-off cadence, so a device that is back on the network is found within
-about 5 minutes at worst, instead of whenever the mDNS daemon next queries on
-its own schedule (up to an hour later). Reported from the field by WeaveHome:
-after a 65-minute outage a Tapo H100 bridge came back, but the controller
-noticed only about 9.5 minutes later; from that moment the subscription was
-re-established in under a second.
+about 5 minutes at worst (see Known limitations), instead of whenever the mDNS
+daemon next queries on its own schedule (up to an hour later). Reported from
+the field by WeaveHome: after a 65-minute outage a Tapo H100 bridge came back,
+but the controller noticed only about 9.5 minutes later; from that moment the
+subscription was re-established in under a second.
 
 Both are patch releases. `matter-transport` adds one `Discovery` method with a
 default implementation, so no implementor breaks. `matter-controller` changes
@@ -49,10 +49,15 @@ reported through `poll_results` and `poll_found` as usual. The default does
 nothing, for a `Discovery` that cannot force a query.
 
 `MdnsSdDiscovery` implements it by re-issuing the browse. mdns-sd then restarts
-its query sequence for that service type (about five small multicast queries
-over the next 15 s, each listing the answers the daemon already holds, so
-devices it already knows stay silent) and replays every record it has cached.
-Nothing the previous browse had not yet delivered is lost in the switch.
+its query sequence for that service type: about five small multicast queries in
+the first 15 s and about nine in the first 5 minutes, each listing the answers
+the daemon already holds and that are not past half their lifetime, so devices
+it already knows stay silent (one whose record is past that point may answer,
+which is harmless). It also replays every record it has cached, about two
+events per instance, into a 10-event channel; mdns-sd's daemon thread, which
+does all of its mDNS work, stalls whenever that channel is full until the
+browse is next polled, so poll promptly for a while after a requery. Nothing
+the previous browse had not yet delivered is lost in the switch.
 
 ### matter-transport: Changed — `poll_found` reports an instance once per appearance
 
@@ -77,20 +82,25 @@ to one record per instance per re-query until it is polled or stopped.
 ### matter-controller: Changed — the resubscribe watch re-queries
 
 While a subscription is waiting to be re-established, the controller re-sends
-its fabric's operational subtype query (`_I<fabric>._sub._matter._tcp`) 30 s
+its fabric's operational subtype query (`_I<CFID>._sub._matter._tcp`) 30 s
 after it starts watching, then 60, 120 and 240 s apart, then every 5 minutes,
-for as long as anything waits (RFC 6762 §5.2 asks continuous queries to back
-off). A node that newly starts waiting restarts the sequence at 30 s. A device
-that answers is handled exactly like one that announced itself: its waiting
-subscriptions are retried at once with their backoff reset.
+for as long as anything waits. That backs off in the spirit of RFC 6762 §5.2,
+but stops doubling at 5 minutes rather than the 60 minutes §5.2 sets. A node
+that newly starts waiting restarts the sequence at 30 s. A device that answers
+is handled exactly like one that announced itself: its waiting subscriptions
+are retried at once with their backoff reset.
 
-Costs: while anything waits, each re-query makes the mDNS daemon send a few
-small queries over about 15 s and replay the records it holds for the fabric;
-the controller drains that replay early (after 250 ms instead of 1 s). No
-re-query is sent while the controller's short-lived base-type `_matter._tcp`
-fallback browse is open, since a node resolve is then already driving queries.
+Costs: while anything waits, each re-query restarts the mDNS daemon's own query
+sequence (about five small queries in the first 15 s; about nine per 5-minute
+step at the cap, where a settled browse sends about one an hour) and makes it
+replay the records it holds for the fabric. The daemon's thread stalls while
+that replay waits to be drained, so for 15 s after each re-query the controller
+drains every 250 ms instead of every second: the stall is well under a second
+for a 10-device fabric and a few seconds for a very large one. No re-query is
+sent while the controller's short-lived base-type `_matter._tcp` fallback
+browse is open, since a node resolve is then already driving queries.
 
-Known limitations, unchanged:
+Known limitations:
 
 - Thread devices behind a border router whose SRP advertising proxy kept
   serving their records while they were offline produce no new record when

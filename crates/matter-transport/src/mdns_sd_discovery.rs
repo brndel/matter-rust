@@ -86,9 +86,10 @@
 //! doubling schedule (1 s, 2 s, 4 s, … capped at an hour). mdns-sd accepts a
 //! response only if it answers one of its active queriers, so a device whose
 //! announcement it did not take is otherwise seen only at that next query. The
-//! query carries known answers, so devices whose PTR the daemon holds stay
-//! silent, and a device whose PTR expired while it was away answers with a new
-//! one: a `ServiceFound`.
+//! query carries known answers — the cached PTRs not yet past half their TTL —
+//! so devices whose fresh PTR the daemon holds stay silent (a live device past
+//! that half-life may answer anyway, which is harmless), and a device whose PTR
+//! expired while it was away answers with a new one: a `ServiceFound`.
 //!
 //! The swap is lossless. `daemon.browse` only queues a command, so the old
 //! receiver is kept and drained ahead of the new one until the new one's
@@ -97,11 +98,28 @@
 //! can be overtaken. The re-issued browse replays every cached PTR as
 //! `ServiceFound` plus `ServiceResolved`: found events for instances already
 //! present are suppressed (above), resolved records are re-delivered (latest
-//! wins). Costs per requery: a replay of up to `1 + 2N` events into mdns-sd's
-//! 10-slot channel (the daemon thread waits for the next drain while it is
-//! full), a restarted query chain (the first query after 10–50 ms, then 1, 2,
-//! 4, 8, 16 s …: about five small multicast queries over ~15 s), and up to
-//! three ANY queries for any instance cached but not yet resolved.
+//! wins).
+//!
+//! Costs per requery, for `N` cached instances of the type:
+//!
+//! - **A blocked daemon thread until the replay is drained.** The replay is
+//!   up to `1 + 2N` events into mdns-sd's 10-slot channel, and the daemon
+//!   thread — all mDNS processing for this daemon, in every browse and every
+//!   registration — waits whenever that channel is full until the caller's
+//!   next [`Discovery::poll_results`] / [`Discovery::poll_found`] drains it.
+//!   How long that takes is up to the caller's polling: drained every
+//!   250 ms (as `matter-controller` does for 15 s after each requery), it is
+//!   well under a second for a 10-device fabric and a few seconds for a very
+//!   large one.
+//! - **A restarted query chain.** The first query goes out after 10–50 ms,
+//!   then 1, 2, 4, 8, 16 s … apart, doubling up to an hour: about five small
+//!   multicast PTR queries in the first 15 s and about nine in the first
+//!   5 minutes. A caller that requeries every 5 minutes therefore sends about
+//!   nine queries per 5 minutes instead of the one an hour a settled browse
+//!   sends. The old chain stops by itself at its first step after its
+//!   receiver is gone.
+//! - **Up to three ANY queries** for any instance cached but not yet
+//!   resolved.
 //!
 //! # Diagnostics
 //!
@@ -323,8 +341,12 @@ impl BrowseState {
     /// mdns-sd sends `SearchStarted` to a new listener first, in the same
     /// daemon step that installs it as the querier's listener
     /// (`exec_command_browse`, mdns-sd 0.21.3 `service_daemon.rs` 3857 then
-    /// 3874), so everything the daemon ever sends to the old receiver precedes
-    /// the new receiver's first event:
+    /// 3874), so every record event (found, resolved, removed) the daemon
+    /// sends to the old receiver precedes the new receiver's first event. Only
+    /// the old query chain can still reach the old receiver after that: if its
+    /// next step comes before the old receiver is dropped, it delivers an
+    /// inert `SearchStarted` to that receiver (traced and ignored) and sends
+    /// one more PTR query; its first step after the drop ends it. The steps:
     ///
     /// 1. drain `retiring` (this also unblocks a daemon thread waiting on a
     ///    full old channel);
@@ -362,8 +384,10 @@ impl BrowseState {
                 apply(event);
             }
             if let Some(first) = receiver.try_next() {
-                // 3. The switch point. Nothing reaches the old receiver after
-                //    this event was sent, but some may have since step 1.
+                // 3. The switch point. No record event reaches the old
+                //    receiver after this one was sent, but some may have
+                //    since step 1; only a stale chain's inert SearchStarted
+                //    can follow, and it is traced and ignored.
                 while let Some(event) = old.try_next() {
                     apply(event);
                 }
@@ -830,11 +854,15 @@ impl Discovery for MdnsSdDiscovery {
     /// reported ([`Discovery::poll_found`]); resolved replays are re-delivered
     /// to every handle by [`Discovery::poll_results`] (latest wins). The
     /// replay is up to `1 + 2N` events into mdns-sd's 10-slot channel, so with
-    /// five or more instances the daemon thread waits for the next drain. The
-    /// restarted query chain sends about five small multicast PTR queries over
-    /// the next ~15 s, each carrying known answers (so devices whose PTR the
-    /// daemon holds stay silent), and re-arms up to three ANY queries for any
-    /// instance cached but not yet resolved.
+    /// five or more instances the daemon thread — all of this daemon's mDNS
+    /// processing — stalls whenever that channel is full until the caller
+    /// drains it, about one channel's worth per poll: poll briskly for a while
+    /// after a requery. The restarted query chain sends about five small
+    /// multicast PTR queries in the first 15 s and about nine in the first
+    /// 5 minutes, each carrying known answers (the cached PTRs not past half
+    /// their TTL, so devices whose fresh PTR the daemon holds stay silent),
+    /// and re-arms up to three ANY queries for any instance cached but not yet
+    /// resolved.
     fn requery(&mut self, handle: QueryHandle) {
         let Some(service_type) = self.handle_types.get(&handle) else {
             return;

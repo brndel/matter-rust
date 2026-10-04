@@ -411,7 +411,9 @@ const WATCH_OPEN_RETRY: std::time::Duration = std::time::Duration::from_secs(10)
 /// The watch waits for a device to re-announce itself, which takes seconds to
 /// minutes, so it does not need [`RESOLVE_POLL_INTERVAL`]'s 250 ms: one wake a
 /// second per controller with a subscription waiting costs nothing, and adds
-/// at most a second to a recovery that was going to take minutes.
+/// at most a second to a recovery that was going to take minutes. For
+/// [`REQUERY_FAST_DRAIN`] after each watch re-query the drain runs at
+/// [`RESOLVE_POLL_INTERVAL`] instead.
 const ADVERT_WATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Minimum time between two **advert-triggered** pulls of one subscription
@@ -448,9 +450,11 @@ const ADVERT_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_milli
 /// and re-sends a browse's query on a doubling schedule capped at an hour. A
 /// device whose announcement the subtype querier did not take is otherwise
 /// seen only at that next scheduled query — up to an hour late (`WeaveHome`
-/// field report on 0.16). A fresh query carries known answers, so devices
-/// whose PTR the daemon holds stay silent, and a returning device answers with
-/// a new PTR: exactly the advert the watch acts on.
+/// field report on 0.16). A fresh query carries known answers (the cached
+/// PTRs not past half their TTL), so devices whose fresh PTR the daemon holds
+/// stay silent, and a returning device answers with a new PTR: exactly the
+/// advert the watch acts on. A live device past that half-life may answer too;
+/// its PTR is not new, so it is not an advert.
 #[cfg(not(test))]
 const ADVERT_REQUERY_FIRST: std::time::Duration = std::time::Duration::from_secs(30);
 /// Shortened under `cfg(test)`, keeping production's 1 : 10 ratio to
@@ -461,9 +465,12 @@ const ADVERT_REQUERY_FIRST: std::time::Duration = std::time::Duration::from_mill
 
 /// The re-query cadence doubles from [`ADVERT_REQUERY_FIRST`] up to this cap:
 /// 30, 60, 120, 240 s apart, then every 300 s (maintainer decision,
-/// 2026-10-04). RFC 6762 §5.2 asks continuous queries to back off; 5 min bounds
-/// the controller's own detection of a long outage, and an application's own
-/// browse calling `resubscribe_now` stays the fast path.
+/// 2026-10-04). It backs off in the spirit of RFC 6762 §5.2, but stops
+/// doubling at 5 min rather than at the 60 min §5.2 sets, because 5 min bounds
+/// the controller's own detection of a long outage; an application's own browse
+/// calling `resubscribe_now` stays the fast path. Each re-query also restarts
+/// the resolver's own 1, 2, 4 … s query chain, so at the cap mdns-sd sends
+/// about nine small queries per 5-minute step instead of about one an hour.
 #[cfg(not(test))]
 const ADVERT_REQUERY_MAX: std::time::Duration = std::time::Duration::from_secs(300);
 /// Shortened under `cfg(test)` with [`ADVERT_REQUERY_FIRST`].
@@ -476,8 +483,8 @@ const ADVERT_REQUERY_MAX: std::time::Duration = std::time::Duration::from_secs(3
 ///
 /// A re-query makes mdns-sd replay every PTR it caches for the subtype, about
 /// `2N + 1` events for `N` cached instances, into a 10-slot channel, and the
-/// daemon thread — all mDNS processing in the process — waits whenever that
-/// channel is full until the next drain. At the 1 s watch cadence that stall
+/// daemon thread — all of that daemon's mDNS processing — waits whenever
+/// that channel is full until the next drain. At the 1 s watch cadence that stall
 /// would last several seconds on a large fabric; draining every 250 ms keeps
 /// it to well under a second for a 10-device fabric and a few seconds for a
 /// very large one. 15 s spans the restarted query chain's first burst (queries
@@ -1603,9 +1610,12 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     /// The cadence step `watch_requery_at` was scheduled with; the next step is
     /// double this, capped at [`ADVERT_REQUERY_MAX`].
     watch_requery_interval: Duration,
-    /// The nodes in a resubscribe episode at the previous cadence step, sorted
-    /// and deduplicated ([`Self::resubscribe_episode_nodes`]). A node missing
-    /// from it has just been lost, and restarts the cadence at its first step.
+    /// The nodes in a resubscribe episode as of the previous
+    /// [`Self::drive_watch_requery`] pass, sorted and deduplicated
+    /// ([`Self::resubscribe_episode_nodes`]). Refreshed on every such pass —
+    /// every timer pass while the watch is needed and the subtype browse is
+    /// held — not only when a re-query goes out. A node missing from it has
+    /// just been lost, and restarts the cadence at its first step.
     watch_episode_nodes: Vec<u64>,
     /// End of the fast-drain window a watch re-query opens: set to
     /// [`REQUERY_FAST_DRAIN`] after the re-query, and until then every
@@ -4659,11 +4669,15 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// - **Adopt:** a held handle with no schedule (just opened by the watch,
     ///   or opened by `spawn_connect`) gets its first re-query
     ///   [`ADVERT_REQUERY_FIRST`] from now.
-    /// - **Reset:** a node that was not in an episode at the previous step has
-    ///   just been lost, so the cadence restarts at its first step — never
-    ///   later than a re-query already scheduled. Every newly lost node gets
-    ///   the 30 s → 5 min sequence whatever other nodes already wait; this is
-    ///   bounded because episodes begin only at liveness timeouts.
+    /// - **Reset:** a node that was not in an episode on the previous pass
+    ///   (`watch_episode_nodes`, refreshed on every pass) has just been lost,
+    ///   so the cadence restarts at its first step — never later than a
+    ///   re-query already scheduled. Every newly lost node gets the 30 s →
+    ///   5 min sequence whatever other nodes already wait; this is bounded
+    ///   because episodes begin only at liveness timeouts. If a re-query is
+    ///   already due on the pass a node joins, it goes out on that pass and
+    ///   the next one follows 60 s later (the second step), never after the
+    ///   longer interval the interrupted cadence may have reached.
     /// - **Re-query** once due, unless the base-type fallback browse is live:
     ///   a resolve is already driving queries then, and acting on the subtype
     ///   beside a live base browse is what #113 forbids. (That also covers a
