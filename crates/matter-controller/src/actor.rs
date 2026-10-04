@@ -95,8 +95,9 @@ fn response_needs_timed(opcode: u8, payload: &[u8]) -> bool {
 /// mDNS results arrive by *polling* ([`Actor::drive_pending_resolves`] drains
 /// [`Discovery::poll_results`]), not on a stored deadline, so this is the only
 /// remaining periodic component of the actor's park while `pending_resolves` is
-/// non-empty. While only the resubscribe watch holds the subtype browse the
-/// slower [`ADVERT_WATCH_POLL_INTERVAL`] applies instead. Every other timer
+/// non-empty, and for [`REQUERY_FAST_DRAIN`] after a watch re-query. While
+/// only the resubscribe watch holds the subtype browse the slower
+/// [`ADVERT_WATCH_POLL_INTERVAL`] applies otherwise. Every other timer
 /// source contributes a real deadline through [`Actor::next_timer_deadline`].
 ///
 /// [`Discovery::poll_results`]: matter_transport::Discovery::poll_results
@@ -468,6 +469,26 @@ const ADVERT_REQUERY_MAX: std::time::Duration = std::time::Duration::from_secs(3
 /// Shortened under `cfg(test)` with [`ADVERT_REQUERY_FIRST`].
 #[cfg(test)]
 const ADVERT_REQUERY_MAX: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long after a watch re-query the subtype browse is drained every
+/// [`RESOLVE_POLL_INTERVAL`] instead of every [`ADVERT_WATCH_POLL_INTERVAL`]
+/// ([`Actor::drive_pending_resolves`]).
+///
+/// A re-query makes mdns-sd replay every PTR it caches for the subtype, about
+/// `2N + 1` events for `N` cached instances, into a 10-slot channel, and the
+/// daemon thread — all mDNS processing in the process — waits whenever that
+/// channel is full until the next drain. At the 1 s watch cadence that stall
+/// would last several seconds on a large fabric; draining every 250 ms keeps
+/// it to well under a second for a 10-device fabric and a few seconds for a
+/// very large one. 15 s spans the restarted query chain's first burst (queries
+/// about 0, 1, 3, 7 and 15 s after the re-query), so the answers it draws are
+/// drained briskly too, and stays shorter than [`ADVERT_REQUERY_FIRST`], so
+/// the watch is back on its 1 s cadence between re-queries.
+///
+/// Not shortened under `cfg(test)`: the unit tests reach past the window with
+/// synthetic instants, and under the shortened re-query cadence the in-crate
+/// end-to-end test only drains more often for it, never less.
+const REQUERY_FAST_DRAIN: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// chip `GetFibonacciForIndex` (F(0)=0, F(1)=1, F(2)=1, F(3)=2, …).
 fn fibonacci(n: u32) -> u64 {
@@ -1480,10 +1501,11 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     /// device, or a transport whose `recv_from` returns errors back-to-back)
     /// would otherwise push a relative tick forward forever and starve
     /// discovery. Advanced by [`Self::drive_pending_resolves`], which picks the
-    /// interval: [`RESOLVE_POLL_INTERVAL`] while a resolve is parked, and once
-    /// right after a watch re-query (`drain_soon`);
-    /// [`ADVERT_WATCH_POLL_INTERVAL`] while only the resubscribe watch holds the
-    /// subtype browse. Consulted only in those two states.
+    /// interval: [`RESOLVE_POLL_INTERVAL`] while a resolve is parked, and for
+    /// [`REQUERY_FAST_DRAIN`] after a watch re-query
+    /// (`requery_fast_drain_until`); [`ADVERT_WATCH_POLL_INTERVAL`] while only
+    /// the resubscribe watch holds the subtype browse. Consulted only in those
+    /// two states.
     next_resolve_poll: Instant,
     /// Consecutive `recv_from` errors in the current run.
     ///
@@ -1585,15 +1607,19 @@ pub(crate) struct Actor<T: AsyncDatagram, D: Discovery> {
     /// and deduplicated ([`Self::resubscribe_episode_nodes`]). A node missing
     /// from it has just been lost, and restarts the cadence at its first step.
     watch_episode_nodes: Vec<u64>,
-    /// Set by a watch re-query so the next [`Self::drive_pending_resolves`]
-    /// re-arms the drain tick at [`RESOLVE_POLL_INTERVAL`] instead of
-    /// [`ADVERT_WATCH_POLL_INTERVAL`], and cleared by it. mdns-sd replays its
-    /// cache for the re-issued browse into a 10-slot channel and its thread
-    /// waits while that is full, so the replay is drained early, once. A flag
-    /// rather than an earlier `next_resolve_poll`: reconcile runs just before
+    /// End of the fast-drain window a watch re-query opens: set to
+    /// [`REQUERY_FAST_DRAIN`] after the re-query, and until then every
+    /// [`Self::drive_pending_resolves`] pass re-arms the drain tick at
+    /// [`RESOLVE_POLL_INTERVAL`] instead of [`ADVERT_WATCH_POLL_INTERVAL`].
+    /// mdns-sd replays its cache for the
+    /// re-issued browse into a 10-slot channel and its daemon thread waits
+    /// while that is full, so the replay is drained briskly. A deadline rather
+    /// than an earlier `next_resolve_poll`: reconcile runs just before
     /// `drive_pending_resolves`, which re-arms the tick first thing and would
-    /// overwrite it in the same pass.
-    drain_soon: bool,
+    /// overwrite it in the same pass. Left in place once passed (it is inert
+    /// then); `None` when no re-query has run since the subtype browse was
+    /// opened, and cleared by [`Self::close_subtype_browse`].
+    requery_fast_drain_until: Option<Instant>,
     /// Operational records drained from that browse, keyed by ASCII-lowercased
     /// instance name. A drain consumes what it returns, so every record is
     /// cached — not just the ones a resolve is parked for right now — or a
@@ -2235,7 +2261,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             watch_requery_at: None,
             watch_requery_interval: ADVERT_REQUERY_FIRST,
             watch_episode_nodes: Vec::new(),
-            drain_soon: false,
+            requery_fast_drain_until: None,
             seen_records: HashMap::new(),
             multicast_if: None,
             group_counters: HashMap::new(),
@@ -4087,12 +4113,14 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// `query_operational_fabric` returns one handle for both): the base
     /// release stops it then, once.
     ///
-    /// Also drops the watch's re-query schedule: every close path goes through
-    /// here, so a reopened watch always starts at [`ADVERT_REQUERY_FIRST`].
+    /// Also drops the watch's re-query schedule and any post-re-query fast
+    /// drain window: every close path goes through here, so a reopened watch
+    /// always starts at [`ADVERT_REQUERY_FIRST`] on the 1 s drain cadence.
     fn close_subtype_browse(&mut self) {
         self.resolve_query_fabric_cfid = None;
         self.advert_quiet_until = None;
         self.watch_requery_at = None;
+        self.requery_fast_drain_until = None;
         if let Some(handle) = self.resolve_query_fabric.take() {
             if self.resolve_query != Some(handle) {
                 self.discovery.stop_query(handle);
@@ -4642,8 +4670,9 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     ///   `Discovery` handing out one handle for both browses: equal handles
     ///   mean the base one is live.) A skipped re-query stays due and goes out
     ///   on the first pass after the base browse closes. The interval then
-    ///   doubles up to [`ADVERT_REQUERY_MAX`], and `drain_soon` pulls the next
-    ///   drain in.
+    ///   doubles up to [`ADVERT_REQUERY_MAX`], and `requery_fast_drain_until`
+    ///   holds the drain tick at [`RESOLVE_POLL_INTERVAL`] for the next
+    ///   [`REQUERY_FAST_DRAIN`].
     ///
     /// No quiet window follows a re-query: the adapter's `poll_found` does not
     /// re-report an instance it already reported, so the daemon's replay is
@@ -4687,7 +4716,7 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
             .saturating_mul(2)
             .min(ADVERT_REQUERY_MAX);
         self.watch_requery_at = Some(now + self.watch_requery_interval);
-        self.drain_soon = true;
+        self.requery_fast_drain_until = Some(now + REQUERY_FAST_DRAIN);
         tracing::debug!(
             target: "matter_controller::actor",
             waiting_nodes = self.watch_episode_nodes.len(),
@@ -4767,24 +4796,29 @@ impl<T: AsyncDatagram, D: Discovery> Actor<T, D> {
     /// Returns immediately when nothing is parked and the resubscribe watch
     /// holds no browse — an idle controller pays nothing. With only the watch
     /// held it drains the subtype browse every [`ADVERT_WATCH_POLL_INTERVAL`],
-    /// except right after a watch re-query (`drain_soon`), when the next drain
-    /// is [`RESOLVE_POLL_INTERVAL`] away, once.
+    /// except for [`REQUERY_FAST_DRAIN`] after a watch re-query
+    /// (`requery_fast_drain_until`), when it drains every
+    /// [`RESOLVE_POLL_INTERVAL`].
     fn drive_pending_resolves(&mut self) {
         // Re-arm the polling tick FIRST, before any early return: the loop only
         // consults it while entries are parked or the resubscribe watch holds
         // the subtype browse, and arming it unconditionally means no path can
         // leave a due-in-the-past anchor behind that would spin the fairness
         // guard. A parked resolve is polled briskly; the watch alone, which only
-        // waits for a device to re-announce, at the slower cadence.
-        // Right after a watch re-query the daemon is replaying its cache into
-        // a small channel; drain it early, once (`drain_soon`).
-        let interval = if self.pending_resolves.is_empty() && !self.drain_soon {
+        // waits for a device to re-announce, at the slower cadence — except
+        // while a watch re-query's fast-drain window is open: the daemon is
+        // replaying its cache into a small channel, and its thread waits for
+        // each drain while that is full.
+        let now = Instant::now();
+        let fast_drain = self
+            .requery_fast_drain_until
+            .is_some_and(|until| now < until);
+        let interval = if self.pending_resolves.is_empty() && !fast_drain {
             ADVERT_WATCH_POLL_INTERVAL
         } else {
             RESOLVE_POLL_INTERVAL
         };
-        self.drain_soon = false;
-        self.next_resolve_poll = Instant::now() + interval;
+        self.next_resolve_poll = now + interval;
         if self.pending_resolves.is_empty() && self.resolve_query_fabric.is_none() {
             return;
         }
@@ -24108,36 +24142,110 @@ mod tests {
         assert_eq!(actor.watch_requery_at, Some(later + ADVERT_REQUERY_FIRST));
     }
 
-    /// Spec 2026-10-04 test 9 / Review Focus 3: after a re-query and a full
-    /// drive pass (reconcile, then `drive_pending_resolves`, which re-arms the
-    /// tick first thing), the next drain is `RESOLVE_POLL_INTERVAL` away, not
-    /// the watch's 1 s; the flag is consumed, so the pass after is back on 1 s.
+    /// Spec 2026-10-04 test 9 / Review Focus 3, widened by the final review:
+    /// after a re-query, every full drive pass (reconcile, then
+    /// `drive_pending_resolves`, which re-arms the tick first thing) inside
+    /// [`REQUERY_FAST_DRAIN`] re-arms the drain at `RESOLVE_POLL_INTERVAL`, not
+    /// the watch's 1 s — not just the first one. mdns-sd's cache replay of
+    /// about `2N + 1` events goes through a 10-slot channel, so one early drain
+    /// would leave its daemon thread waiting on the 1 s cadence for the rest.
     #[tokio::test]
-    async fn a_requery_pulls_the_next_drain_in_once() {
+    async fn a_requery_holds_the_fast_drain_for_its_window() {
         let (discovery, state) = watch_discovery();
         let mut actor = actor_with_one_fabric_using(discovery);
         let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
         actor.resubscribes.push(pr);
         let t0 = Instant::now();
         actor.reconcile_resubscribe_watch(t0);
-        assert!(!actor.drain_soon, "no re-query yet");
-
-        actor.reconcile_resubscribe_watch(t0 + ADVERT_REQUERY_FIRST);
-        assert_eq!(state.lock().unwrap().requeries, vec![WATCH_SUBTYPE_HANDLE]);
+        assert_eq!(actor.requery_fast_drain_until, None, "no re-query yet");
         let before = Instant::now();
         actor.drive_pending_resolves();
         assert!(
-            actor.next_resolve_poll < before + ADVERT_WATCH_POLL_INTERVAL,
-            "the drain after a re-query comes early, not on the 1 s watch tick"
+            actor.next_resolve_poll >= before + ADVERT_WATCH_POLL_INTERVAL,
+            "before any re-query the watch drains on its 1 s tick"
         );
-        assert!(actor.next_resolve_poll >= before + RESOLVE_POLL_INTERVAL);
-        assert!(!actor.drain_soon, "consumed by that pass");
+
+        let requeried_at = t0 + ADVERT_REQUERY_FIRST;
+        actor.reconcile_resubscribe_watch(requeried_at);
+        assert_eq!(state.lock().unwrap().requeries, vec![WATCH_SUBTYPE_HANDLE]);
+        assert_eq!(
+            actor.requery_fast_drain_until,
+            Some(requeried_at + REQUERY_FAST_DRAIN)
+        );
+        // Several consecutive full passes, all well inside the window (they
+        // take microseconds; the window is 15 s).
+        for pass in 1..=4 {
+            actor.reconcile_resubscribe_watch(Instant::now());
+            let before = Instant::now();
+            actor.drive_pending_resolves();
+            assert!(
+                actor.next_resolve_poll < before + ADVERT_WATCH_POLL_INTERVAL,
+                "pass {pass} inside the window drains early, not on the 1 s watch tick"
+            );
+            assert!(actor.next_resolve_poll >= before + RESOLVE_POLL_INTERVAL);
+        }
+        assert_eq!(
+            state.lock().unwrap().requeries.len(),
+            1,
+            "the passes drained; they did not re-query"
+        );
+    }
+
+    /// Final review C1: once [`REQUERY_FAST_DRAIN`] has passed since the
+    /// re-query, the watch is back on its 1 s drain tick. The re-query is
+    /// driven at a synthetic instant far enough in the past that its window
+    /// has already closed by the real clock `drive_pending_resolves` reads.
+    #[tokio::test]
+    async fn after_the_fast_drain_window_the_watch_drains_on_its_tick() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        let t0 = Instant::now()
+            .checked_sub(ADVERT_REQUERY_FIRST + REQUERY_FAST_DRAIN + Duration::from_secs(1))
+            .expect("process uptime exceeds the window under test");
+        actor.reconcile_resubscribe_watch(t0);
+        actor.reconcile_resubscribe_watch(t0 + ADVERT_REQUERY_FIRST);
+        assert_eq!(state.lock().unwrap().requeries, vec![WATCH_SUBTYPE_HANDLE]);
+        let until = actor
+            .requery_fast_drain_until
+            .expect("the re-query opened a fast-drain window");
+        assert!(until < Instant::now(), "the window has passed");
 
         let before = Instant::now();
         actor.drive_pending_resolves();
         assert!(
             actor.next_resolve_poll >= before + ADVERT_WATCH_POLL_INTERVAL,
-            "only once: the next pass is back on the watch tick"
+            "past the window the watch drains on its 1 s tick again"
+        );
+    }
+
+    /// Final review C1: `close_subtype_browse` clears the fast-drain window
+    /// with the rest of the watch's re-query state, so a reopened watch starts
+    /// on its 1 s drain tick rather than inheriting a closed browse's window.
+    #[tokio::test]
+    async fn closing_the_subtype_browse_clears_the_fast_drain_window() {
+        let (discovery, state) = watch_discovery();
+        let mut actor = actor_with_one_fabric_using(discovery);
+        let (pr, _reports, _ctrl) = test_pending_resubscribe(1, WATCH_NODE_A, 4, far_future());
+        actor.resubscribes.push(pr);
+        let t0 = Instant::now();
+        actor.reconcile_resubscribe_watch(t0);
+        actor.reconcile_resubscribe_watch(t0 + ADVERT_REQUERY_FIRST);
+        assert_eq!(state.lock().unwrap().requeries, vec![WATCH_SUBTYPE_HANDLE]);
+        assert!(actor.requery_fast_drain_until.is_some());
+
+        actor.close_subtype_browse();
+        assert_eq!(actor.requery_fast_drain_until, None);
+
+        // Still waiting: the next pass reopens the watch, on the 1 s tick.
+        actor.reconcile_resubscribe_watch(Instant::now());
+        assert_eq!(state.lock().unwrap().subtype_opens, 2, "reopened");
+        let before = Instant::now();
+        actor.drive_pending_resolves();
+        assert!(
+            actor.next_resolve_poll >= before + ADVERT_WATCH_POLL_INTERVAL,
+            "a reopened watch does not inherit the closed browse's fast drain"
         );
     }
 
